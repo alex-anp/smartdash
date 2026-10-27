@@ -3,7 +3,7 @@
 
 // Board: ESP32-2424S012
 // Display 240x240 round IPS - likely GC9A01
-// Touch controller - TBD after board inspection
+// Touch controller - TBD after board inspection (not used for main UI control)
 
 // Pin mapping - PLACEHOLDER, verify against actual ESP32-2424S012 board
 // Common variants exist; adjust on arrival
@@ -14,10 +14,14 @@
 #define TFT_SCL  18  // SCK
 #define TFT_BL   27  // backlight (if present)
 
-// Touch I2C - PLACEHOLDER
+// Touch I2C - PLACEHOLDER (optional)
 #define TOUCH_SDA 21
 #define TOUCH_SCL 22
 #define TOUCH_INT 33
+
+// Wi-Fi AP for web config
+#define WIFI_AP_SSID "SmartDash"
+#define WIFI_AP_PASS "smartdash"
 
 // Vehicle specific
 #define VEHICLE_NAME "Honda Dunk AF78"

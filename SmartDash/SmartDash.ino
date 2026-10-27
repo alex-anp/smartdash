@@ -2,9 +2,9 @@
  * SmartDash - Honda Dunk AF78 OBD-II dashboard
  * Board: ESP32-2424S012 (240x240 round IPS)
  * Display: GC9A01 (SPI) - verify driver on arrival
- * Touch: CST816S/other - verify on arrival
  * BT: BluetoothSerial (Classic) + BLE support planned
  * ELM327 via BT, auto-connect to last paired
+ * Config: built-in Wi-Fi AP web interface
  */
 
 #include <Arduino.h>
@@ -14,6 +14,7 @@
 #include "elm327.h"
 #include "ui.h"
 #include "storage.h"
+#include "web.h"
 
 void setup() {
   Serial.begin(115200);
@@ -22,6 +23,7 @@ void setup() {
   storage_init();
   display_init();
   ui_show_boot();
+  web_init();
   elm_init();
 
   // Auto-connect to last saved ELM327
@@ -36,5 +38,6 @@ void setup() {
 void loop() {
   elm_loop();
   ui_loop();
+  web_loop();
   delay(10);
 }
