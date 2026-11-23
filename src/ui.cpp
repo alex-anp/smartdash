@@ -93,16 +93,68 @@ void draw_rpm(int rpm) {
   draw_rpm_ticks();
 }
 
+void draw_seg_digit(lgfx::LGFX_Device& g, int x, int y, int w, int h, int t, int digit, uint16_t on, uint16_t off) {
+  static const uint8_t seg[10] = {
+    0x3F, // 0
+    0x06, // 1
+    0x5B, // 2
+    0x4F, // 3
+    0x66, // 4
+    0x6D, // 5
+    0x7D, // 6
+    0x07, // 7
+    0x7F, // 8
+    0x6F, // 9
+  };
+  uint8_t m = (digit >= 0 && digit <= 9) ? seg[digit] : 0;
+  int gap = 2;
+  int hh = (h - 3 * t) / 2;
+  int mid = y + h / 2 - t / 2;
+  auto col = [&](bool en) { return en ? on : off; };
+  int r = t / 3;
+  // A
+  g.fillRoundRect(x + t + gap, y, w - 2 * t - 2 * gap, t, r, col(m & 0x01));
+  // B
+  g.fillRoundRect(x + w - t, y + t + gap, t, hh - gap, r, col(m & 0x02));
+  // C
+  g.fillRoundRect(x + w - t, mid + t / 2 + gap, t, hh - gap, r, col(m & 0x04));
+  // D
+  g.fillRoundRect(x + t + gap, y + h - t, w - 2 * t - 2 * gap, t, r, col(m & 0x08));
+  // E
+  g.fillRoundRect(x, mid + t / 2 + gap, t, hh - gap, r, col(m & 0x10));
+  // F
+  g.fillRoundRect(x, y + t + gap, t, hh - gap, r, col(m & 0x20));
+  // G
+  g.fillRoundRect(x + t + gap, mid, w - 2 * t - 2 * gap, t, r, col(m & 0x40));
+}
+
 void draw_speed(int speed) {
   auto& g = display_get();
-  char buf[8];
-  snprintf(buf, sizeof(buf), "%d", constrain(speed, 0, 199));
+  speed = constrain(speed, 0, 199);
+
+  const int digitW = 44;
+  const int digitH = 80;
+  const int segT = 8;
+  const int spacing = 10;
+  const int totalW = digitW * 3 + spacing * 2;
+  const int x0 = SCREEN_CENTER_X - totalW / 2;
+  const int y0 = SCREEN_CENTER_Y - 50;
+
+  g.fillRect(SCREEN_CENTER_X - 100, y0 - 6, 200, digitH + 38, TFT_BLACK);
+
+  uint16_t on = 0xFFFF;
+  uint16_t off = 0x1082;
+  int d1 = speed / 100;
+  int d2 = (speed / 10) % 10;
+  int d3 = speed % 10;
+
+  draw_seg_digit(g, x0, y0, digitW, digitH, segT, (d1 == 0) ? -1 : d1, on, off);
+  draw_seg_digit(g, x0 + digitW + spacing, y0, digitW, digitH, segT, (d1 == 0 && d2 == 0) ? -1 : d2, on, off);
+  draw_seg_digit(g, x0 + 2 * (digitW + spacing), y0, digitW, digitH, segT, d3, on, off);
+
   g.setTextDatum(middle_center);
-  g.setTextColor(TFT_WHITE, TFT_BLACK);
-  g.fillRect(70, 120, 220, 90, TFT_BLACK);
-  g.drawString(buf, SCREEN_CENTER_X, SCREEN_CENTER_Y - 8, 8);
   g.setTextColor(0xC618, TFT_BLACK);
-  g.drawString("km/h", SCREEN_CENTER_X, SCREEN_CENTER_Y + 52, 4);
+  g.drawString("km/h", SCREEN_CENTER_X, y0 + digitH + 16, 4);
 }
 
 void draw_temp_icon(int x, int y, uint16_t c) {
