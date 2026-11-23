@@ -5,3 +5,6 @@
 
 # Vendor board docs/examples (large)
 /JC3636W518EN/
+
+# Reference SD card contents (local only)
+/reference/sdcard/
