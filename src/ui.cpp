@@ -293,9 +293,9 @@ void ui_show_dash() {
 
 void ui_loop() {
   uint32_t now = millis();
-  if (now - last_demo_ms > 120) {
-    last_demo_ms = now;
-    if (!elm_is_connected()) {
+  if (!elm_is_connected()) {
+    if (now - last_demo_ms > 120) {
+      last_demo_ms = now;
       static uint32_t t = 0;
       t++;
       cur.connected = false;
@@ -306,8 +306,6 @@ void ui_loop() {
       // Sweep voltage through zones: <11 red, 11-12 orange, 12-15 green, >15 red
       cur.volt = 13.0f + sinf(t * 0.012f) * 3.2f; // ~9.8..16.2
       dirty = true;
-    } else {
-      cur.connected = true;
     }
   }
 
