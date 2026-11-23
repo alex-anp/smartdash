@@ -95,8 +95,19 @@ void draw_rpm(int rpm) {
   auto& d = g();
   draw_arc_bg();
   if (rpm > 0) {
-    d.fillArc(SCREEN_CENTER_X, SCREEN_CENTER_Y, RPM_ARC_R_OUT, RPM_ARC_R_IN, RPM_ARC_START,
-              rpm_angle(rpm), rpm_color(rpm));
+    struct Zone { int from; int to; uint16_t color; };
+    static const Zone zones[] = {
+      {0, 7000, TFT_GREEN},
+      {7000, 9000, TFT_ORANGE},
+      {9000, 10000, TFT_RED},
+    };
+    for (const auto& z : zones) {
+      if (rpm <= z.from) break;
+      int segEnd = rpm < z.to ? rpm : z.to;
+      d.fillArc(SCREEN_CENTER_X, SCREEN_CENTER_Y, RPM_ARC_R_OUT, RPM_ARC_R_IN,
+                rpm_angle(z.from), rpm_angle(segEnd), z.color);
+      if (rpm <= z.to) break;
+    }
   }
   draw_rpm_ticks();
 }
