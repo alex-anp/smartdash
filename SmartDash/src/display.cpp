@@ -1,12 +1,12 @@
 #include "display.h"
 #include "config.h"
 
-// Placeholder driver setup - replace with actual library for board
-// Options: TFT_eSPI (GC9A01), Arduino_GFX, LovyanGFX
+// JC3636W518C: ST77916 QSPI, 360x360
+// Vendor demo uses ESP32_Display_Panel + LVGL 8.x
+// TODO: integrate display driver after verifying demo on real board
 
 void display_init() {
-  // TODO: init GC9A01/TFT driver after board inspection
-  // TODO: init backlight
+  // TODO: init ST77916 QSPI panel, backlight (TFT_BLK), and LVGL/display buffer
 }
 
 void display_clear(uint16_t color) {

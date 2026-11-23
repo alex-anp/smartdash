@@ -1,0 +1,7 @@
+.DS_Store
+.idea/
+.vscode/
+*.log
+
+# Vendor board docs/examples (large)
+/JC3636W518EN/

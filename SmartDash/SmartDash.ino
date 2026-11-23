@@ -1,9 +1,8 @@
 /*
  * SmartDash - Honda Dunk AF78 OBD-II dashboard
- * Board: ESP32-2424S012 (240x240 round IPS)
- * Display: GC9A01 (SPI) - verify driver on arrival
- * BT: BluetoothSerial (Classic) + BLE support planned
- * ELM327 via BT, auto-connect to last paired
+ * Board: JC3636W518C (ESP32-S3, 360x360 round IPS, ST77916 QSPI)
+ * BT: BLE (ESP32-S3 has no Bluetooth Classic)
+ * ELM327 via BLE, auto-connect to last paired
  * Config: built-in Wi-Fi AP web interface
  */
 
