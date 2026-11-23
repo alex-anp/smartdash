@@ -21,7 +21,9 @@ void setup() {
 
   storage_init();
   display_init();
+  ui_init();
   ui_show_boot();
+  delay(700);
   web_init();
   elm_init();
 
