@@ -130,31 +130,29 @@ void draw_seg_digit(lgfx::LGFX_Device& g, int x, int y, int w, int h, int t, int
 
 void draw_speed(int speed) {
   auto& g = display_get();
-  speed = constrain(speed, 0, 199);
+  speed = constrain(speed, 0, 99);
 
-  const int digitW = 44;
-  const int digitH = 80;
-  const int segT = 8;
-  const int spacing = 10;
-  const int totalW = digitW * 3 + spacing * 2;
+  const int digitW = 56;
+  const int digitH = 96;
+  const int segT = 10;
+  const int spacing = 14;
+  const int totalW = digitW * 2 + spacing;
   const int x0 = SCREEN_CENTER_X - totalW / 2;
-  const int y0 = SCREEN_CENTER_Y - 50;
+  const int y0 = SCREEN_CENTER_Y - 56;
 
-  g.fillRect(SCREEN_CENTER_X - 100, y0 - 6, 200, digitH + 38, TFT_BLACK);
+  g.fillRect(SCREEN_CENTER_X - 90, y0 - 8, 180, digitH + 44, TFT_BLACK);
 
   uint16_t on = 0xFFFF;
   uint16_t off = 0x1082;
-  int d1 = speed / 100;
-  int d2 = (speed / 10) % 10;
-  int d3 = speed % 10;
+  int d1 = speed / 10;
+  int d2 = speed % 10;
 
   draw_seg_digit(g, x0, y0, digitW, digitH, segT, (d1 == 0) ? -1 : d1, on, off);
-  draw_seg_digit(g, x0 + digitW + spacing, y0, digitW, digitH, segT, (d1 == 0 && d2 == 0) ? -1 : d2, on, off);
-  draw_seg_digit(g, x0 + 2 * (digitW + spacing), y0, digitW, digitH, segT, d3, on, off);
+  draw_seg_digit(g, x0 + digitW + spacing, y0, digitW, digitH, segT, d2, on, off);
 
   g.setTextDatum(middle_center);
   g.setTextColor(0xC618, TFT_BLACK);
-  g.drawString("km/h", SCREEN_CENTER_X, y0 + digitH + 16, 4);
+  g.drawString("km/h", SCREEN_CENTER_X, y0 + digitH + 18, 4);
 }
 
 void draw_temp_icon(int x, int y, uint16_t c) {
