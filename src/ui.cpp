@@ -91,28 +91,56 @@ void draw_speed(int speed) {
   g.drawString("km/h", SCREEN_CENTER_X, SCREEN_CENTER_Y + 52, 4);
 }
 
+void draw_temp_icon(int x, int y, uint16_t c) {
+  auto& g = display_get();
+  // Thermometer stem
+  g.drawRoundRect(x - 4, y - 12, 8, 16, 3, c);
+  // Bulb
+  g.fillCircle(x, y + 7, 5, c);
+  // Mercury
+  g.fillRect(x - 1, y - 7, 2, 12, c);
+  // Tick marks
+  g.drawFastHLine(x + 5, y - 8, 3, c);
+  g.drawFastHLine(x + 5, y - 4, 3, c);
+  g.drawFastHLine(x + 5, y, 3, c);
+}
+
+void draw_batt_icon(int x, int y, uint16_t c) {
+  auto& g = display_get();
+  // Battery body
+  g.drawRoundRect(x - 12, y - 8, 22, 16, 2, c);
+  // Positive terminal
+  g.fillRect(x + 10, y - 3, 3, 6, c);
+  // Plus sign
+  g.drawFastHLine(x - 7, y, 5, c);
+  g.drawFastVLine(x - 5, y - 2, 5, c);
+  // Minus sign
+  g.drawFastHLine(x + 1, y, 5, c);
+}
+
 void draw_bottom(int coolant_c, float volt, bool connected) {
   auto& g = display_get();
-  g.fillRect(40, 285, 280, 50, TFT_BLACK);
-  g.setTextDatum(middle_center);
-  g.setTextColor(0xAD55, TFT_BLACK);
+  g.fillRect(30, 278, 300, 60, TFT_BLACK);
+  uint16_t iconColor = 0xC618;
+  uint16_t textColor = 0xD6BA;
 
+  // Temperature
+  draw_temp_icon(86, 298, iconColor);
+  g.setTextDatum(middle_left);
+  g.setTextColor(textColor, TFT_BLACK);
   char tbuf[16];
-  if (coolant_c < 0) {
-    snprintf(tbuf, sizeof(tbuf), "T -- C");
-  } else {
-    snprintf(tbuf, sizeof(tbuf), "T %d C", coolant_c);
-  }
-  char vbuf[16];
-  if (volt <= 0.1f) {
-    snprintf(vbuf, sizeof(vbuf), "U --.-V");
-  } else {
-    snprintf(vbuf, sizeof(vbuf), "U %.1fV", volt);
-  }
-  char line[40];
-  snprintf(line, sizeof(line), "%s   %s", tbuf, vbuf);
-  g.drawString(line, SCREEN_CENTER_X, 300, 4);
+  if (coolant_c < 0) snprintf(tbuf, sizeof(tbuf), "--C");
+  else snprintf(tbuf, sizeof(tbuf), "%dC", coolant_c);
+  g.drawString(tbuf, 100, 298, 4);
 
+  // Battery voltage
+  draw_batt_icon(234, 298, iconColor);
+  char vbuf[16];
+  if (volt <= 0.1f) snprintf(vbuf, sizeof(vbuf), "--.-V");
+  else snprintf(vbuf, sizeof(vbuf), "%.1fV", volt);
+  g.drawString(vbuf, 250, 298, 4);
+
+  g.setTextDatum(middle_center);
   g.setTextColor(connected ? TFT_GREEN : TFT_ORANGE, TFT_BLACK);
   g.drawString(connected ? "ELM: OK" : "ELM: ...", SCREEN_CENTER_X, 324, 2);
 }
