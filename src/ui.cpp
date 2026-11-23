@@ -178,11 +178,11 @@ void draw_bottom(int coolant_c, float volt, bool connected) {
   else snprintf(tbuf, sizeof(tbuf), "%dC", coolant_c);
   d.drawString(tbuf, 100, 298, 4);
 
-  draw_batt_icon(234, 298, iconColor);
+  draw_batt_icon(222, 298, iconColor);
   char vbuf[16];
   if (volt <= 0.1f) snprintf(vbuf, sizeof(vbuf), "--.-V");
   else snprintf(vbuf, sizeof(vbuf), "%.1fV", volt);
-  d.drawString(vbuf, 250, 298, 4);
+  d.drawString(vbuf, 238, 298, 4);
 
   d.setTextDatum(middle_center);
   d.setTextColor(connected ? TFT_GREEN : TFT_ORANGE, TFT_BLACK);
