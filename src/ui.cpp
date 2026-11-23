@@ -290,8 +290,10 @@ void ui_loop() {
       cur.connected = false;
       cur.rpm = (int)((sinf(t * 0.08f) * 0.5f + 0.5f) * 9200);
       cur.speed_kmh = (int)((sinf(t * 0.05f + 1.0f) * 0.5f + 0.5f) * 85);
-      cur.coolant_c = 78 + (int)(sinf(t * 0.02f) * 3);
-      cur.volt = 13.8f + sinf(t * 0.03f) * 0.4f;
+      // Sweep temp through zones: <60 blue, 60-90 green, >90 red
+      cur.coolant_c = 75 + (int)(sinf(t * 0.015f) * 35); // ~40..110
+      // Sweep voltage through zones: <11 red, 11-12 orange, 12-15 green, >15 red
+      cur.volt = 13.0f + sinf(t * 0.012f) * 3.2f; // ~9.8..16.2
       dirty = true;
     } else {
       cur.connected = true;
