@@ -167,18 +167,31 @@ void draw_batt_icon(int x, int y, uint16_t c) {
 void draw_bottom(int coolant_c, float volt, bool connected) {
   auto& d = g();
   d.fillRect(30, 278, 300, 60, TFT_BLACK);
-  uint16_t iconColor = 0xC618;
-  uint16_t textColor = 0xD6BA;
+  uint16_t tColor = 0xC618;
+  if (coolant_c >= 0) {
+    if (coolant_c < 60) tColor = TFT_CYAN;
+    else if (coolant_c <= 90) tColor = TFT_GREEN;
+    else tColor = TFT_RED;
+  }
 
-  draw_temp_icon(86, 298, iconColor);
+  uint16_t vColor = 0xC618;
+  if (volt > 0.1f) {
+    if (volt < 11.0f) vColor = TFT_RED;
+    else if (volt < 12.0f) vColor = TFT_ORANGE;
+    else if (volt <= 15.0f) vColor = TFT_GREEN;
+    else vColor = TFT_RED;
+  }
+
+  draw_temp_icon(86, 298, tColor);
   d.setTextDatum(middle_left);
-  d.setTextColor(textColor, TFT_BLACK);
+  d.setTextColor(tColor, TFT_BLACK);
   char tbuf[16];
   if (coolant_c < 0) snprintf(tbuf, sizeof(tbuf), "--C");
   else snprintf(tbuf, sizeof(tbuf), "%dC", coolant_c);
   d.drawString(tbuf, 100, 298, 4);
 
-  draw_batt_icon(222, 298, iconColor);
+  draw_batt_icon(222, 298, vColor);
+  d.setTextColor(vColor, TFT_BLACK);
   char vbuf[16];
   if (volt <= 0.1f) snprintf(vbuf, sizeof(vbuf), "--.-V");
   else snprintf(vbuf, sizeof(vbuf), "%.1fV", volt);
