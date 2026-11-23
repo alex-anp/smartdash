@@ -15,19 +15,24 @@
 - Display is QSPI ST77916 360x360, not SPI GC9A01
 
 ## TODO
-1. Run vendor LVGL demo on board (Arduino 3.x, ESP32_Display_Panel 0.1.4, ESP32_IO_Expander 0.0.2, LVGL 8.4.x)
+1. Confirm PlatformIO build/upload on board
 2. Confirm touch/controller and backlight behavior
 3. Implement minimal dashboard UI on 360x360
 4. Implement BLE ELM327 scan/connect + AT init
 5. Implement web config UI (AP mode)
 
-## Libraries to consider (Arduino IDE)
-- ESP32_Display_Panel + ESP32_IO_Expander (vendor path)
-- LVGL 8.4.x (vendor demo) or custom lightweight drawing
-- NimBLE-Arduino / BLEDevice for BLE ELM327
+## PlatformIO
+- Env: `jc3636w518c` in `platformio.ini`
+- Build: `~/.platformio/penv/bin/pio run`
+- Upload: `~/.platformio/penv/bin/pio run -t upload`
+- Monitor: `~/.platformio/penv/bin/pio device monitor`
+
+## Libraries
+- LovyanGFX (display, candidate)
+- NimBLE-Arduino (BLE ELM327)
 - WiFi + WebServer (built-in)
 - Preferences (built-in)
-- ArduinoJson (for config)
+- ArduinoJson (config)
 
 ## Wiring notes
 - Power: Type-C

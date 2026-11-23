@@ -3,6 +3,9 @@
 .vscode/
 *.log
 
+# PlatformIO
+.pio/
+
 # Vendor board docs/examples (large)
 /JC3636W518EN/
 
