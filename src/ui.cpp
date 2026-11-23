@@ -9,15 +9,20 @@
 namespace {
 
 constexpr int RPM_ARC_R_OUT = 176;
-constexpr int RPM_ARC_R_IN = 162;
-constexpr float RPM_ARC_START = 135.0f;
-constexpr float RPM_ARC_SWEEP = 270.0f;
+constexpr int RPM_ARC_R_IN = 160;
+constexpr float RPM_ARC_START = 150.0f;  // 240 degrees total
+constexpr float RPM_ARC_SWEEP = 240.0f;
 
 DashData cur;
 DashData drawn;
 bool dirty = true;
 bool static_drawn = false;
 uint32_t last_demo_ms = 0;
+
+float rpm_angle(int rpm) {
+  rpm = constrain(rpm, 0, RPM_MAX);
+  return RPM_ARC_START + RPM_ARC_SWEEP * ((float)rpm / (float)RPM_MAX);
+}
 
 uint16_t rpm_color(int rpm) {
   if (rpm >= RPM_REDLINE) return TFT_RED;
@@ -32,16 +37,46 @@ void draw_arc_bg() {
             RPM_ARC_START + RPM_ARC_SWEEP, 0x2104);
 }
 
+void draw_rpm_ticks() {
+  auto& g = display_get();
+  for (int k = 0; k <= 10; k++) {
+    float a = rpm_angle(k * 1000) * (float)M_PI / 180.0f;
+    bool major = (k % 2 == 0);
+    int r1 = RPM_ARC_R_OUT + 2;
+    int r2 = major ? (RPM_ARC_R_IN - 10) : (RPM_ARC_R_IN - 3);
+    uint16_t c = major ? TFT_WHITE : 0x8410;
+    int x1 = SCREEN_CENTER_X + (int)(cosf(a) * r1);
+    int y1 = SCREEN_CENTER_Y + (int)(sinf(a) * r1);
+    int x2 = SCREEN_CENTER_X + (int)(cosf(a) * r2);
+    int y2 = SCREEN_CENTER_Y + (int)(sinf(a) * r2);
+    g.drawLine(x1, y1, x2, y2, c);
+  }
+}
+
+void draw_rpm_labels() {
+  auto& g = display_get();
+  g.setTextDatum(middle_center);
+  g.setTextColor(TFT_WHITE, TFT_BLACK);
+  for (int k = 0; k <= 10; k += 2) {
+    float a = rpm_angle(k * 1000) * (float)M_PI / 180.0f;
+    int r = RPM_ARC_R_IN - 24;
+    int x = SCREEN_CENTER_X + (int)(cosf(a) * r);
+    int y = SCREEN_CENTER_Y + (int)(sinf(a) * r);
+    char buf[4];
+    snprintf(buf, sizeof(buf), "%d", k);
+    g.drawString(buf, x, y, 4);
+  }
+}
+
 void draw_rpm(int rpm) {
   rpm = constrain(rpm, 0, RPM_MAX);
-  float frac = (float)rpm / (float)RPM_MAX;
-  float end = RPM_ARC_START + RPM_ARC_SWEEP * frac;
   auto& g = display_get();
   draw_arc_bg();
-  if (frac > 0.001f) {
-    g.fillArc(SCREEN_CENTER_X, SCREEN_CENTER_Y, RPM_ARC_R_OUT, RPM_ARC_R_IN, RPM_ARC_START, end,
-              rpm_color(rpm));
+  if (rpm > 0) {
+    g.fillArc(SCREEN_CENTER_X, SCREEN_CENTER_Y, RPM_ARC_R_OUT, RPM_ARC_R_IN, RPM_ARC_START,
+              rpm_angle(rpm), rpm_color(rpm));
   }
+  draw_rpm_ticks();
 }
 
 void draw_speed(int speed) {
@@ -87,6 +122,8 @@ void draw_static() {
   g.fillScreen(TFT_BLACK);
   g.drawCircle(SCREEN_CENTER_X, SCREEN_CENTER_Y, 179, 0x1082);
   draw_arc_bg();
+  draw_rpm_ticks();
+  draw_rpm_labels();
   static_drawn = true;
   dirty = true;
 }
