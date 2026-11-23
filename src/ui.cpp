@@ -39,17 +39,31 @@ void draw_arc_bg() {
 
 void draw_rpm_ticks() {
   auto& g = display_get();
-  for (int k = 0; k <= 10; k++) {
-    float a = rpm_angle(k * 1000) * (float)M_PI / 180.0f;
-    bool major = (k % 2 == 0);
+  for (int i = 0; i <= 20; i++) {  // every 500 rpm
+    int rpm = i * 500;
+    float a = rpm_angle(rpm) * (float)M_PI / 180.0f;
+    bool thousand = (i % 2 == 0);
     int r1 = RPM_ARC_R_OUT + 2;
-    int r2 = major ? (RPM_ARC_R_IN - 10) : (RPM_ARC_R_IN - 3);
-    uint16_t c = major ? TFT_WHITE : 0x8410;
-    int x1 = SCREEN_CENTER_X + (int)(cosf(a) * r1);
-    int y1 = SCREEN_CENTER_Y + (int)(sinf(a) * r1);
-    int x2 = SCREEN_CENTER_X + (int)(cosf(a) * r2);
-    int y2 = SCREEN_CENTER_Y + (int)(sinf(a) * r2);
-    g.drawLine(x1, y1, x2, y2, c);
+    int r2 = thousand ? (RPM_ARC_R_IN - 12) : (RPM_ARC_R_IN - 5);
+    uint16_t c = thousand ? TFT_WHITE : 0x8410;
+
+    float ca = cosf(a), sa = sinf(a);
+    int x1 = SCREEN_CENTER_X + (int)(ca * r1);
+    int y1 = SCREEN_CENTER_Y + (int)(sa * r1);
+    int x2 = SCREEN_CENTER_X + (int)(ca * r2);
+    int y2 = SCREEN_CENTER_Y + (int)(sa * r2);
+
+    if (thousand) {
+      // thicker tick: draw 3 parallel lines
+      float nx = -sa, ny = ca;  // normal
+      for (int d = -1; d <= 1; d++) {
+        int ox = (int)(nx * d);
+        int oy = (int)(ny * d);
+        g.drawLine(x1 + ox, y1 + oy, x2 + ox, y2 + oy, c);
+      }
+    } else {
+      g.drawLine(x1, y1, x2, y2, c);
+    }
   }
 }
 
