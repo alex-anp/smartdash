@@ -155,8 +155,12 @@ void draw_rpm(int rpm) {
       int y1 = SCREEN_CENTER_Y + (int)(sa * RPM_ARC_R_IN);
       int x2 = SCREEN_CENTER_X + (int)(ca * RPM_ARC_R_OUT);
       int y2 = SCREEN_CENTER_Y + (int)(sa * RPM_ARC_R_OUT);
-      d.drawLine(x1, y1, x2, y2, 0x2104);
-      d.drawLine(x1 + (int)nx, y1 + (int)ny, x2 + (int)nx, y2 + (int)ny, 0x2104);
+      // A 4 px gap keeps neighbouring 200 rpm segments visually separate.
+      for (int off = -2; off <= 1; off++) {
+        int ox = (int)(nx * off);
+        int oy = (int)(ny * off);
+        d.drawLine(x1 + ox, y1 + oy, x2 + ox, y2 + oy, 0x2104);
+      }
     }
   }
   draw_rpm_ticks();
