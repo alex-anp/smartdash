@@ -14,6 +14,7 @@ constexpr uint32_t SCAN_TIME_MS = 4000;
 constexpr uint32_t CMD_TIMEOUT_MS = 1200;
 constexpr uint32_t POLL_GAP_MS = 120;
 constexpr uint32_t RECONNECT_GAP_MS = 3000;
+constexpr uint32_t CONNECT_TIMEOUT_MS = 4000;
 constexpr size_t MAX_FOUND = 8;
 
 NimBLEAdvertisedDevice* advDevice = nullptr;
@@ -26,6 +27,8 @@ bool connecting = false;
 bool connected = false;
 bool needScanRestart = false;
 uint32_t lastScanRestart = 0;
+uint32_t connectStartedAt = 0;
+String pendingAddr;
 ElmStatus status = ElmStatus::Idle;
 
 ElmScanEntry found[MAX_FOUND];
@@ -289,6 +292,21 @@ void handleInit() {
   }
 }
 
+void finishConnect() {
+  if (!client) return;
+  if (!pickChars(client)) {
+    Serial.println("[ELM] no usable chars");
+    client->disconnect();
+    connecting = false;
+    setStatus(ElmStatus::Idle);
+    needScanRestart = true;
+    return;
+  }
+  storage_save_last_elm(pendingAddr);
+  connecting = false;
+  startInit();
+}
+
 bool connectToAdv() {
   if (!advDevice) return false;
   connecting = true;
@@ -297,6 +315,7 @@ bool connectToAdv() {
   cmdState = CMD_IDLE;
 
   NimBLEAddress addr = advDevice->getAddress();
+  pendingAddr = String(addr.toString().c_str());
   client = NimBLEDevice::getClientByPeerAddress(addr);
   if (!client) client = NimBLEDevice::getDisconnectedClient();
   if (!client) {
@@ -308,33 +327,24 @@ bool connectToAdv() {
     client = NimBLEDevice::createClient();
     client->setClientCallbacks(&clientCB, false);
     client->setConnectionParams(12, 12, 0, 51);
-    client->setConnectTimeout(5);
+    client->setConnectTimeout(3);
   }
 
   if (!client->isConnected()) {
-    if (!client->connect(advDevice)) {
+    // Async connect returns immediately; blocking connect() could stall the
+    // main loop for seconds and freeze the demo UI.
+    if (!client->connect(addr, true, true, true)) {
       Serial.println("[ELM] connect failed");
-      NimBLEDevice::deleteClient(client);
-      client = nullptr;
       connecting = false;
       setStatus(ElmStatus::Idle);
       needScanRestart = true;
       return false;
     }
+    connectStartedAt = millis();
+    return true;  // completion handled in elm_loop()
   }
 
-  if (!pickChars(client)) {
-    Serial.println("[ELM] no usable chars");
-    client->disconnect();
-    connecting = false;
-    setStatus(ElmStatus::Idle);
-    needScanRestart = true;
-    return false;
-  }
-
-  storage_save_last_elm(String(addr.toString().c_str()));
-  connecting = false;
-  startInit();
+  finishConnect();
   return true;
 }
 
@@ -447,6 +457,19 @@ void elm_loop() {
   if (doConnect) {
     doConnect = false;
     connectToAdv();
+  }
+
+  if (connecting && client) {
+    if (client->isConnected()) {
+      Serial.println("[ELM] async connect done");
+      finishConnect();
+    } else if (millis() - connectStartedAt > CONNECT_TIMEOUT_MS) {
+      Serial.println("[ELM] async connect timeout");
+      client->cancelConnect();
+      connecting = false;
+      setStatus(ElmStatus::Idle);
+      needScanRestart = true;
+    }
   }
 
   if (initState != INIT_IDLE && initState != INIT_DONE && initState != INIT_FAIL) {
