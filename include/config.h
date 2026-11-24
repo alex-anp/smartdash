@@ -47,7 +47,7 @@
 // Vehicle specific
 #define VEHICLE_NAME "Honda Dunk AF78"
 #define RPM_REDLINE 8000
-#define RPM_MAX 10000  // adjust if needed
+#define RPM_MAX 12000  // tachometer full scale
 
 // Units
 #define USE_KMH true

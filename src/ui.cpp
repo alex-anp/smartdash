@@ -12,6 +12,7 @@ constexpr int RPM_ARC_R_OUT = 176;
 constexpr int RPM_ARC_R_IN = 160;
 constexpr float RPM_ARC_START = 150.0f;  // 240 degrees total
 constexpr float RPM_ARC_SWEEP = 240.0f;
+constexpr int RPM_SEGMENT_RPM = 100;  // 0.1k rpm per indicator segment
 
 LGFX_Sprite canvas(&display_get());
 bool canvas_ok = false;
@@ -57,13 +58,6 @@ float rpm_angle(int rpm) {
   return RPM_ARC_START + RPM_ARC_SWEEP * ((float)rpm / (float)RPM_MAX);
 }
 
-uint16_t rpm_color(int rpm) {
-  if (rpm >= RPM_REDLINE) return TFT_RED;
-  if (rpm >= RPM_REDLINE - 1000) return TFT_ORANGE;
-  if (rpm >= RPM_REDLINE - 2000) return TFT_YELLOW;
-  return TFT_GREEN;
-}
-
 lgfx::LGFX_Device& g() { return canvas_ok ? (lgfx::LGFX_Device&)canvas : display_get(); }
 
 void flush() {
@@ -90,7 +84,7 @@ void draw_arc_bg() {
 
 void draw_rpm_ticks() {
   auto& d = g();
-  for (int i = 0; i <= 20; i++) {  // every 500 rpm
+  for (int i = 0; i <= RPM_MAX / 500; i++) {  // every 500 rpm
     int rpm = i * 500;
     float a = rpm_angle(rpm) * (float)M_PI / 180.0f;
     bool thousand = (i % 2 == 0);
@@ -121,7 +115,7 @@ void draw_rpm_labels() {
   auto& d = g();
   d.setTextDatum(middle_center);
   d.setTextColor(TFT_WHITE, TFT_BLACK);
-  for (int k = 0; k <= 10; k += 2) {
+  for (int k = 0; k <= RPM_MAX / 1000; k += 2) {
     float a = rpm_angle(k * 1000) * (float)M_PI / 180.0f;
     int r = RPM_ARC_R_IN - 24;
     int x = SCREEN_CENTER_X + (int)(cosf(a) * r);
@@ -139,9 +133,9 @@ void draw_rpm(int rpm) {
   if (rpm > 0) {
     struct Zone { int from; int to; uint16_t color; };
     static const Zone zones[] = {
-      {0, 7000, TFT_GREEN},
-      {7000, 9000, TFT_ORANGE},
-      {9000, 10000, TFT_RED},
+      {0, RPM_REDLINE, TFT_GREEN},
+      {RPM_REDLINE, RPM_REDLINE + 2000, TFT_ORANGE},
+      {RPM_REDLINE + 2000, RPM_MAX, TFT_RED},
     };
     for (const auto& z : zones) {
       if (rpm <= z.from) break;
@@ -149,6 +143,20 @@ void draw_rpm(int rpm) {
       d.fillArc(SCREEN_CENTER_X, SCREEN_CENTER_Y, RPM_ARC_R_OUT, RPM_ARC_R_IN,
                 rpm_angle(z.from), rpm_angle(segEnd), z.color);
       if (rpm <= z.to) break;
+    }
+
+    // Split the filled arc into 0.1k rpm segments with thin dark gaps.
+    // Drawing separators is much cheaper than one fillArc() call per segment.
+    for (int r = RPM_SEGMENT_RPM; r < rpm; r += RPM_SEGMENT_RPM) {
+      float a = rpm_angle(r) * (float)M_PI / 180.0f;
+      float ca = cosf(a), sa = sinf(a);
+      float nx = -sa, ny = ca;
+      int x1 = SCREEN_CENTER_X + (int)(ca * RPM_ARC_R_IN);
+      int y1 = SCREEN_CENTER_Y + (int)(sa * RPM_ARC_R_IN);
+      int x2 = SCREEN_CENTER_X + (int)(ca * RPM_ARC_R_OUT);
+      int y2 = SCREEN_CENTER_Y + (int)(sa * RPM_ARC_R_OUT);
+      d.drawLine(x1, y1, x2, y2, 0x2104);
+      d.drawLine(x1 + (int)nx, y1 + (int)ny, x2 + (int)nx, y2 + (int)ny, 0x2104);
     }
   }
   draw_rpm_ticks();
@@ -567,7 +575,7 @@ void ui_loop() {
     int s = sweep_step;
     int half = SWEEP_STEPS / 2;
 
-    // RPM: 0 -> 10000 -> 0.
+    // RPM: 0 -> RPM_MAX -> 0.
     cur.rpm = (s <= half) ? (RPM_MAX * s / half)
                           : (RPM_MAX * (SWEEP_STEPS - s) / half);
     // Speed: 99 -> 0.
