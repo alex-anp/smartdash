@@ -12,7 +12,7 @@ constexpr int RPM_ARC_R_OUT = 176;
 constexpr int RPM_ARC_R_IN = 160;
 constexpr float RPM_ARC_START = 150.0f;  // 240 degrees total
 constexpr float RPM_ARC_SWEEP = 240.0f;
-constexpr int RPM_SEGMENT_RPM = 200;  // 0.2k rpm per indicator segment
+constexpr int RPM_SEGMENT_RPM = 250;  // 0.25k rpm per indicator segment
 
 LGFX_Sprite canvas(&display_get());
 bool canvas_ok = false;
@@ -145,7 +145,7 @@ void draw_rpm(int rpm) {
       if (rpm <= z.to) break;
     }
 
-    // Split the filled arc into 0.2k rpm segments with thin dark gaps.
+    // Split the filled arc into 0.25k rpm segments with dark gaps.
     // Drawing separators is much cheaper than one fillArc() call per segment.
     for (int r = RPM_SEGMENT_RPM; r < rpm; r += RPM_SEGMENT_RPM) {
       float a = rpm_angle(r) * (float)M_PI / 180.0f;
@@ -155,7 +155,7 @@ void draw_rpm(int rpm) {
       int y1 = SCREEN_CENTER_Y + (int)(sa * RPM_ARC_R_IN);
       int x2 = SCREEN_CENTER_X + (int)(ca * RPM_ARC_R_OUT);
       int y2 = SCREEN_CENTER_Y + (int)(sa * RPM_ARC_R_OUT);
-      // A 4 px gap keeps neighbouring 200 rpm segments visually separate.
+      // A 4 px gap keeps neighbouring 250 rpm segments visually separate.
       for (int off = -2; off <= 1; off++) {
         int ox = (int)(nx * off);
         int oy = (int)(ny * off);
