@@ -1,3 +1,11 @@
+/*
+ * Board-specific LovyanGFX configuration for JC3636W518C.
+ *
+ * The display is a 360x360 ST77916 connected through a 4-lane SPI bus (QSPI).
+ * The panel is marked non-readable: writes are fast, pixel reads are not used.
+ * Backlight is PWM-controlled and the CST816S touch controller shares this
+ * LGFX instance, so getTouch() works through display_get().
+ */
 #include "display.h"
 #include "config.h"
 
@@ -12,6 +20,8 @@ class LGFX : public lgfx::LGFX_Device {
  public:
   LGFX() {
     {
+      // QSPI bus: one clock plus four data lines defined in config.h.
+      // 40 MHz write / 16 MHz read is the vendor-proven combination for this panel.
       auto cfg = _bus.config();
       cfg.spi_host = SPI2_HOST;
       cfg.spi_mode = 0;
@@ -30,6 +40,8 @@ class LGFX : public lgfx::LGFX_Device {
     }
 
     {
+      // ST77916 geometry: 360x360, inverted, RGB byte order, no readback.
+      // dummy_read_* values and bus_shared=false come from the vendor demo.
       auto cfg = _panel.config();
       cfg.pin_cs = TFT_CS;
       cfg.pin_rst = TFT_RST;
@@ -52,6 +64,7 @@ class LGFX : public lgfx::LGFX_Device {
     }
 
     {
+      // PWM backlight. display_set_brightness() converts percent to 0..255.
       auto cfg = _light.config();
       cfg.pin_bl = TFT_BLK;
       cfg.invert = false;
@@ -62,6 +75,7 @@ class LGFX : public lgfx::LGFX_Device {
     }
 
     {
+      // CST816S on I2C0. INT/RST pins let the controller wake and reset cleanly.
       auto cfg = _touch.config();
       cfg.i2c_port = 0;
       cfg.i2c_addr = 0x15;  // CST816S default
@@ -90,9 +104,9 @@ LGFX gfx;
 LGFX_Device& display_get() { return gfx; }
 
 void display_init() {
-  gfx.init();
+  gfx.init();          // Applies all panel/bus/light/touch settings above
   gfx.setRotation(0);
-  gfx.setBrightness(200);
+  gfx.setBrightness(200);  // ~78%: bright enough outdoors, not full white
   gfx.fillScreen(TFT_BLACK);
   gfx.setTextColor(TFT_GREEN, TFT_BLACK);
   gfx.setTextDatum(middle_center);

@@ -1,6 +1,10 @@
 #ifndef CONFIG_H
 #define CONFIG_H
 
+// Single source of truth for board pins, display geometry and vehicle limits.
+// Keep runtime-tunable values here instead of spreading magic numbers across
+// the UI and BLE modules.
+//
 // Board: JC3636W518C (ESP32-S3R8, 1.8" round 360x360 IPS, ST77916 QSPI, CST816S touch)
 // Pins from vendor demo: JC3636W518EN/2-Program Example/Demo_Arduino_V1.0/ST77916_LVGL_DEMO/pincfg.h
 
@@ -31,7 +35,8 @@
 #define TFT_SDA2 13
 #define TFT_SDA3 14
 
-// Touch I2C (CST816S) - optional, not primary config UI
+// Touch I2C (CST816S). Physical controller lives on I2C port 0; touch is used
+// for swipes and selecting an ELM device, while configuration stays in Wi-Fi AP.
 #define TOUCH_PIN_NUM_I2C_SCL 8
 #define TOUCH_PIN_NUM_I2C_SDA 7
 #define TOUCH_PIN_NUM_INT     41
@@ -49,11 +54,13 @@
 #define RPM_REDLINE 8000
 #define RPM_MAX 12000  // tachometer full scale
 
-// Units
+// Units. The current renderer is fixed to km/h and °C; these flags document
+// the intended direction for a future configurable web UI.
 #define USE_KMH true
 #define USE_CELSIUS true
 
-// ELM
+// ELM. Auto-connect uses the address stored in NVS; the reconnect gap in
+// src/elm327.cpp is kept separate so the BLE task can react without an API call.
 #define ELM_AUTO_CONNECT true
 #define ELM_RECONNECT_INTERVAL 3000
 
