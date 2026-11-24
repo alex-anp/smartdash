@@ -285,87 +285,84 @@ void draw_elm_screen() {
 
   d.fillScreen(TFT_BLACK);
   d.setTextDatum(middle_center);
+
+  // Round screen: usable width shrinks near the top and bottom edges.
+  // Keep all content inside the inscribed circle (radius ~175 from center 180,180).
   d.setTextColor(TFT_WHITE, TFT_BLACK);
-  d.drawString("ELM Connect", SCREEN_CENTER_X, 28, 4);
+  d.drawString("ELM Connect", SCREEN_CENTER_X, 38, 4);
 
-  d.drawRoundRect(12, 10, 72, 34, 6, 0x4208);
-  d.drawRoundRect(276, 10, 72, 34, 6, 0x4208);
-  d.setTextColor(0xC618, TFT_BLACK);
-  d.drawString("Back", 48, 27, 2);
-  d.drawString("Scan", 312, 27, 2);
-
-  d.drawFastHLine(16, 54, 328, 0x2104);
-
-  d.setTextDatum(middle_left);
   uint16_t statusColor = (st == ElmStatus::Connected) ? TFT_GREEN :
                          (st == ElmStatus::Idle) ? 0x8410 : TFT_ORANGE;
   d.setTextColor(statusColor, TFT_BLACK);
-  d.drawString(elm_status_text(st), 24, 74, 2);
+  d.drawString(elm_status_text(st), SCREEN_CENTER_X, 74, 2);
   if (st == ElmStatus::Scanning || st == ElmStatus::Connecting || st == ElmStatus::Initializing) {
-    draw_status_dots(d, 322, 74, statusColor, 0x4208, dot_phase);
+    draw_status_dots(d, 300, 74, statusColor, 0x4208, dot_phase);
   }
 
-  d.drawFastHLine(16, 94, 328, 0x2104);
+  d.drawRoundRect(130, 94, 100, 28, 6, 0x4208);
+  d.setTextColor(0xC618, TFT_BLACK);
+  d.drawString("Scan", SCREEN_CENTER_X, 108, 2);
 
-  ElmScanEntry entries[6];
-  size_t n = elm_get_found(entries, 6);
+  d.drawFastHLine(40, 128, 280, 0x2104);
+
+  ElmScanEntry entries[5];
+  size_t n = elm_get_found(entries, 5);
   if (n == 0) {
-    d.setTextDatum(middle_center);
     d.setTextColor(0x8410, TFT_BLACK);
-    d.drawString("No BLE devices yet", SCREEN_CENTER_X, 170, 2);
-    d.drawString("Keep the ELM nearby", SCREEN_CENTER_X, 196, 2);
+    d.drawString("No BLE devices yet", SCREEN_CENTER_X, 190, 2);
+    d.drawString("Keep ELM nearby", SCREEN_CENTER_X, 214, 2);
   } else {
     for (size_t i = 0; i < n; i++) {
       const ElmScanEntry& e = entries[i];
-      int y0 = 106 + (int)i * 38;
-      d.fillRoundRect(16, y0, 328, 34, 6, e.compatible ? 0x0420 : 0x1082);
-      d.setTextDatum(middle_left);
-      d.setTextColor(e.compatible ? TFT_GREEN : 0x8410, e.compatible ? 0x0420 : 0x1082);
-      d.drawString(e.compatible ? ">" : " ", 26, y0 + 17, 2);
+      int y0 = 134 + (int)i * 30;
+      uint16_t bg = e.compatible ? 0x0420 : 0x1082;
+      d.fillRoundRect(40, y0, 280, 28, 5, bg);
 
-      char name[25];
+      char name[24];
       snprintf(name, sizeof(name), "%s", e.name);
-      d.setTextColor(TFT_WHITE, e.compatible ? 0x0420 : 0x1082);
-      d.drawString(name, 44, y0 + 11, 2);
-      d.setTextColor(0x8410, e.compatible ? 0x0420 : 0x1082);
-      d.drawString(e.address, 44, y0 + 25, 2);
+      d.setTextDatum(middle_left);
+      d.setTextColor(TFT_WHITE, bg);
+      d.drawString(name, 50, y0 + 9, 2);
+
+      // Short MAC (last 8 chars) on a smaller second line.
+      const char* shortAddr = e.address;
+      size_t len = strlen(shortAddr);
+      if (len > 8) shortAddr += len - 8;
+      d.setTextColor(0x8410, bg);
+      d.drawString(shortAddr, 50, y0 + 21, 1);
 
       char rssi[12];
       snprintf(rssi, sizeof(rssi), "%d dBm", e.rssi);
       d.setTextDatum(middle_right);
-      d.setTextColor(e.rssi > -70 ? TFT_GREEN : TFT_ORANGE, e.compatible ? 0x0420 : 0x1082);
-      d.drawString(rssi, 332, y0 + 17, 2);
+      d.setTextColor(e.rssi > -70 ? TFT_GREEN : TFT_ORANGE, bg);
+      d.drawString(rssi, 310, y0 + 14, 2);
     }
   }
 
+  d.drawFastHLine(40, 288, 280, 0x2104);
+
   d.setTextDatum(middle_center);
   d.setTextColor(0x8410, TFT_BLACK);
-  d.drawString(st == ElmStatus::Connected ? "Tap Back to return" : "Tap a device to connect", SCREEN_CENTER_X, 350, 2);
+  d.drawString(st == ElmStatus::Connected ? "Swipe down to return" : "Tap device to connect",
+               SCREEN_CENTER_X, 310, 2);
 
   flush();
 }
 
 void handle_tap(int32_t x, int32_t y) {
-  if (screen == Screen::Dash) {
-    if (in_rect(x, y, 122, 309, 238, 339)) ui_show_elm_connect();
-    return;
-  }
+  if (screen == Screen::Dash) return;  // Swipe up opens the ELM screen.
 
-  if (in_rect(x, y, 12, 10, 84, 44)) {
-    ui_hide_elm_connect();
-    return;
-  }
-  if (in_rect(x, y, 276, 10, 348, 44)) {
+  if (in_rect(x, y, 130, 94, 230, 122)) {
     connectTarget = "";
     elm_start_scan();
     elm_screen_dirty = true;
     return;
   }
-  if (y >= 106 && y <= 336) {
-    ElmScanEntry entries[6];
-    size_t n = elm_get_found(entries, 6);
-    int row = (y - 106) / 38;
-    if (row >= 0 && row < (int)n && y - (106 + row * 38) <= 34) {
+  if (y >= 134 && y <= 284 && x >= 40 && x <= 320) {
+    ElmScanEntry entries[5];
+    size_t n = elm_get_found(entries, 5);
+    int row = (y - 134) / 30;
+    if (row >= 0 && row < (int)n && y - (134 + row * 30) <= 28) {
       connectTarget = entries[row].address;
       elm_connect(connectTarget);
       elm_screen_dirty = true;
@@ -395,9 +392,24 @@ void poll_touch() {
   uint32_t now = millis();
   int32_t dx = touch.x - touch.startX;
   int32_t dy = touch.y - touch.startY;
-  if (dx < 0) dx = -dx;
-  if (dy < 0) dy = -dy;
-  if (now - touch.startedAt < 800 && dx < 24 && dy < 24 && now - touch.lastClick > 250) {
+  int32_t adx = dx < 0 ? -dx : dx;
+  int32_t ady = dy < 0 ? -dy : dy;
+
+  // Vertical swipe: open ELM screen from dash, close it on the way down.
+  if (now - touch.startedAt < 1200 && ady >= 50 && ady > adx * 2 &&
+      now - touch.lastClick > 300) {
+    touch.lastClick = now;
+    if (dy < 0 && screen == Screen::Dash) {
+      Serial.println("[UI] swipe up -> ELM connect");
+      ui_show_elm_connect();
+    } else if (dy > 0 && screen == Screen::ElmConnect) {
+      Serial.println("[UI] swipe down -> dash");
+      ui_hide_elm_connect();
+    }
+    return;
+  }
+
+  if (now - touch.startedAt < 800 && adx < 24 && ady < 24 && now - touch.lastClick > 250) {
     touch.lastClick = now;
     Serial.printf("[UI] tap %d,%d\n", (int)touch.x, (int)touch.y);
     handle_tap(touch.x, touch.y);
