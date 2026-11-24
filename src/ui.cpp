@@ -20,7 +20,13 @@ DashData cur;
 DashData drawn;
 bool dirty = true;
 bool static_drawn = false;
-uint32_t last_demo_ms = 0;
+
+// One-shot startup sweep instead of an endless demo.
+constexpr uint32_t SWEEP_INTERVAL_MS = 100;
+constexpr int SWEEP_STEPS = 40;
+uint32_t last_sweep_ms = 0;
+int sweep_step = 0;
+bool sweep_done = false;
 
 enum class Screen { Dash, ElmConnect };
 Screen screen = Screen::Dash;
@@ -458,6 +464,9 @@ void ui_init() {
   drawn.connected = !cur.connected;
   static_drawn = false;
   dirty = true;
+  last_sweep_ms = millis();
+  sweep_step = 0;
+  sweep_done = false;
 }
 
 void ui_set_data(const DashData& data) {
@@ -536,19 +545,33 @@ void ui_loop() {
   poll_touch();
   poll_button();
 
-  if (!connected) {
-    if (now - last_demo_ms > 120) {
-      last_demo_ms = now;
-      static uint32_t t = 0;
-      t++;
-      cur.connected = false;
-      cur.rpm = (int)((sinf(t * 0.08f) * 0.5f + 0.5f) * 9200);
-      cur.speed_kmh = (int)((sinf(t * 0.05f + 1.0f) * 0.5f + 0.5f) * 85);
-      // Sweep temp through zones: <60 blue, 60-90 green, >90 red
-      cur.coolant_c = 75 + (int)(sinf(t * 0.015f) * 35); // ~40..110
-      // Sweep voltage through zones: <11 red, 11-12 orange, 12-15 green, >15 red
-      cur.volt = 13.0f + sinf(t * 0.012f) * 3.2f; // ~9.8..16.2
-      dirty = true;
+  if (!connected && !sweep_done && now - last_sweep_ms >= SWEEP_INTERVAL_MS) {
+    last_sweep_ms = now;
+
+    int s = sweep_step;
+    int half = SWEEP_STEPS / 2;
+
+    // RPM: 0 -> 10000 -> 0.
+    cur.rpm = (s <= half) ? (RPM_MAX * s / half)
+                          : (RPM_MAX * (SWEEP_STEPS - s) / half);
+    // Speed: 99 -> 0.
+    cur.speed_kmh = 99 * (SWEEP_STEPS - s) / SWEEP_STEPS;
+    // Coolant: 99 -> 0 in 5-degree steps.
+    cur.coolant_c = 99 - min(s * 5 / 2, 99);
+    // Voltage: 16.0 -> 0 in 0.5 V steps.
+    float volt = 16.0f - s * 0.5f;
+    cur.volt = volt > 0.0f ? volt : 0.0f;
+    cur.connected = false;
+    dirty = true;
+
+    if (s >= SWEEP_STEPS) {
+      sweep_done = true;
+      cur.rpm = 0;
+      cur.speed_kmh = 0;
+      cur.coolant_c = 0;
+      cur.volt = 0.0f;
+    } else {
+      sweep_step++;
     }
   }
 
