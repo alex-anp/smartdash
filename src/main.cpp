@@ -40,5 +40,5 @@ void loop() {
   elm_loop();
   ui_loop();
   web_loop();
-  delay(10);
+  delay(2);
 }

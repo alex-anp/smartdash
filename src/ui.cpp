@@ -36,6 +36,7 @@ String connectTarget;
 
 struct TouchInput {
   bool pressed = false;
+  bool swipeHandled = false;
   int32_t x = 0;
   int32_t y = 0;
   int32_t startX = 0;
@@ -377,37 +378,48 @@ void poll_touch() {
   if (count > 0) {
     if (!touch.pressed) {
       touch.pressed = true;
+      touch.swipeHandled = false;
       touch.startX = x;
       touch.startY = y;
       touch.startedAt = millis();
     }
     touch.x = x;
     touch.y = y;
+
+    // Detect the swipe as soon as the threshold is crossed, while the finger
+    // is still moving -- waiting for release adds noticeable lag.
+    if (!touch.swipeHandled) {
+      int32_t dx = x - touch.startX;
+      int32_t dy = y - touch.startY;
+      int32_t adx = dx < 0 ? -dx : dx;
+      int32_t ady = dy < 0 ? -dy : dy;
+      uint32_t now = millis();
+      if (now - touch.startedAt < 1000 && ady >= 60 && ady > adx * 2 &&
+          now - touch.lastClick > 150) {
+        touch.swipeHandled = true;
+        touch.lastClick = now;
+        if (dy < 0 && screen == Screen::Dash) {
+          Serial.println("[UI] swipe up -> ELM connect");
+          ui_show_elm_connect();
+        } else if (dy > 0 && screen == Screen::ElmConnect) {
+          Serial.println("[UI] swipe down -> dash");
+          ui_hide_elm_connect();
+        }
+      }
+    }
     return;
   }
 
   if (!touch.pressed) return;
   touch.pressed = false;
 
+  if (touch.swipeHandled) return;
+
   uint32_t now = millis();
   int32_t dx = touch.x - touch.startX;
   int32_t dy = touch.y - touch.startY;
   int32_t adx = dx < 0 ? -dx : dx;
   int32_t ady = dy < 0 ? -dy : dy;
-
-  // Vertical swipe: open ELM screen from dash, close it on the way down.
-  if (now - touch.startedAt < 1200 && ady >= 50 && ady > adx * 2 &&
-      now - touch.lastClick > 300) {
-    touch.lastClick = now;
-    if (dy < 0 && screen == Screen::Dash) {
-      Serial.println("[UI] swipe up -> ELM connect");
-      ui_show_elm_connect();
-    } else if (dy > 0 && screen == Screen::ElmConnect) {
-      Serial.println("[UI] swipe down -> dash");
-      ui_hide_elm_connect();
-    }
-    return;
-  }
 
   if (now - touch.startedAt < 800 && adx < 24 && ady < 24 && now - touch.lastClick > 250) {
     touch.lastClick = now;
@@ -545,11 +557,11 @@ void ui_loop() {
     last_dot_ms = now;
     dot_phase = (dot_phase + 1) % 3;
     dirty = true;
-    elm_screen_dirty = true;
   }
 
   if (screen == Screen::ElmConnect) {
-    if (elm_screen_dirty || now - last_elm_draw >= 400) {
+    // Full-screen push costs ~50 ms; avoid doing it on every dot tick.
+    if (elm_screen_dirty || now - last_elm_draw >= 600) {
       last_elm_draw = now;
       elm_screen_dirty = false;
       draw_elm_screen();
