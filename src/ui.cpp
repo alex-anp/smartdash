@@ -515,6 +515,16 @@ void ui_hide_elm_connect() {
   if (screen == Screen::Dash) return;
   screen = Screen::Dash;
   static_drawn = false;  // ELM screen overwrote the sprite
+
+  // The cached values still match cur, so ui_show_dash() would skip every
+  // dynamic element after redrawing only the static background. Force a full
+  // redraw of all gauges after returning from the ELM screen.
+  drawn.rpm = -999;
+  drawn.speed_kmh = -999;
+  drawn.coolant_c = -999;
+  drawn.volt = -999;
+  drawn.connected = !cur.connected;
+  drawn_dot_phase = -1;
   dirty = true;
   ui_show_dash();
 }
