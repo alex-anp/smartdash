@@ -245,8 +245,6 @@ void draw_bottom(int coolant_c, float volt, bool connected) {
   d.drawString(vbuf, 238, 298, 4);
 
   // ELM status indicator. Three dots light up in turn while connecting.
-  // A single tap on this area opens the ELM connection screen.
-  d.drawRoundRect(122, 309, 116, 30, 6, connected ? 0x0440 : 0x4208);
   if (connected) {
     d.setTextDatum(middle_center);
     d.setTextColor(TFT_GREEN, TFT_BLACK);
