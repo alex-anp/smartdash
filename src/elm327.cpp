@@ -51,8 +51,8 @@ bool isElmName(const std::string& name) {
          n.indexOf("VEEPEAK") >= 0 || n.indexOf("OBDLINK") >= 0 || n.indexOf("VGATE") >= 0;
 }
 
-class AdvCB : public NimBLEAdvertisedDeviceCallbacks {
-  void onResult(NimBLEAdvertisedDevice* d) override {
+class ScanCB : public NimBLEScanCallbacks {
+  void onResult(const NimBLEAdvertisedDevice* d) override {
     String addr = d->getAddress().toString().c_str();
     std::string name = d->haveName() ? d->getName() : "";
     bool match = false;
@@ -76,11 +76,15 @@ class AdvCB : public NimBLEAdvertisedDeviceCallbacks {
       doConnect = true;
     }
   }
+
+  void onScanEnd(const NimBLEScanResults&, int) override {
+    if (!connected && !connecting && !doConnect) needScanRestart = true;
+  }
 };
 
 class ClientCB : public NimBLEClientCallbacks {
   void onConnect(NimBLEClient*) override { Serial.println("[ELM] connected"); }
-  void onDisconnect(NimBLEClient*) override {
+  void onDisconnect(NimBLEClient*, int) override {
     Serial.println("[ELM] disconnected");
     chrWrite = nullptr;
     chrNotify = nullptr;
@@ -95,10 +99,6 @@ class ClientCB : public NimBLEClientCallbacks {
 };
 
 ClientCB clientCB;
-
-static void scanEnded(NimBLEScanResults) {
-  if (!connected && !connecting && !doConnect) needScanRestart = true;
-}
 
 bool pickChars(NimBLEClient* c) {
   chrWrite = nullptr;
@@ -124,15 +124,10 @@ bool pickChars(NimBLEClient* c) {
     }
   }
   if (!chrWrite || !chrNotify) {
-    auto* services = c->getServices(true);
-    if (services) {
-      for (auto* svc : *services) {
-        auto* chars = svc->getCharacteristics(true);
-        if (!chars) continue;
-        for (auto* ch : *chars) {
-          if (!chrNotify && (ch->canNotify() || ch->canIndicate())) chrNotify = ch;
-          if (!chrWrite && (ch->canWrite() || ch->canWriteNoResponse())) chrWrite = ch;
-        }
+        for (auto* svc : c->getServices(true)) {
+      for (auto* ch : svc->getCharacteristics(true)) {
+        if (!chrNotify && (ch->canNotify() || ch->canIndicate())) chrNotify = ch;
+        if (!chrWrite && (ch->canWrite() || ch->canWriteNoResponse())) chrWrite = ch;
       }
     }
   }
@@ -334,9 +329,9 @@ void handlePoll() {
 
 void elm_init() {
   NimBLEDevice::init("SmartDash");
-  NimBLEDevice::setPower(ESP_PWR_LVL_P9);
+  NimBLEDevice::setPower(9);
   NimBLEScan* scan = NimBLEDevice::getScan();
-  scan->setAdvertisedDeviceCallbacks(new AdvCB(), false);
+  scan->setScanCallbacks(new ScanCB(), false);
   scan->setActiveScan(true);
   scan->setInterval(45);
   scan->setWindow(15);
@@ -354,7 +349,7 @@ void elm_start_scan() {
   pushData(dash);
   needScanRestart = false;
   Serial.println("[ELM] scan start");
-  NimBLEDevice::getScan()->start(SCAN_TIME_MS, scanEnded, false);
+  NimBLEDevice::getScan()->start(SCAN_TIME_MS, false);
 }
 
 void elm_connect_saved(const String& addr) {
@@ -368,7 +363,7 @@ void elm_connect_saved(const String& addr) {
   pushData(dash);
   needScanRestart = false;
   Serial.printf("[ELM] scan for %s\n", addr.c_str());
-  NimBLEDevice::getScan()->start(SCAN_TIME_MS, scanEnded, false);
+  NimBLEDevice::getScan()->start(SCAN_TIME_MS, false);
 }
 
 void elm_connect(const String& addr) {
@@ -376,7 +371,7 @@ void elm_connect(const String& addr) {
   storage_save_last_elm(addr);
   doConnect = false;
   needScanRestart = false;
-  NimBLEDevice::getScan()->start(SCAN_TIME_MS, scanEnded, false);
+  NimBLEDevice::getScan()->start(SCAN_TIME_MS, false);
 }
 
 void elm_loop() {
@@ -401,7 +396,7 @@ void elm_loop() {
       lastScanRestart = now;
       needScanRestart = false;
       Serial.println("[ELM] restart scan");
-      NimBLEDevice::getScan()->start(SCAN_TIME_MS, scanEnded, false);
+      NimBLEDevice::getScan()->start(SCAN_TIME_MS, false);
     }
   }
 }
