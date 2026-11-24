@@ -190,8 +190,14 @@ void draw_speed(int speed) {
   int d1 = speed / 10;
   int d2 = speed % 10;
 
-  draw_seg_digit(d, x0, y0, digitW, digitH, segT, (d1 == 0) ? -1 : d1, on, off);
-  draw_seg_digit(d, x0 + digitW + spacing, y0, digitW, digitH, segT, d2, on, off);
+  if (d1 == 0) {
+    // Keep 0..9 (especially zero after the startup sweep) clearly centered
+    // instead of leaving the tens digit blank and showing only a shifted digit.
+    draw_seg_digit(d, SCREEN_CENTER_X - digitW / 2, y0, digitW, digitH, segT, d2, on, off);
+  } else {
+    draw_seg_digit(d, x0, y0, digitW, digitH, segT, d1, on, off);
+    draw_seg_digit(d, x0 + digitW + spacing, y0, digitW, digitH, segT, d2, on, off);
+  }
 
   d.setTextDatum(middle_center);
   d.setTextColor(0xC618, TFT_BLACK);
