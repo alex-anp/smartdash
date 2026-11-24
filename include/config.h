@@ -7,6 +7,20 @@
 #define SCREEN_WIDTH  360
 #define SCREEN_HEIGHT 360
 
+// USB CDC printf can block the calling task for hundreds of milliseconds.
+// Runtime logging is therefore disabled by default; enable only for debugging
+// with -DSMARTDASH_SERIAL_DEBUG=1.
+#ifndef SMARTDASH_SERIAL_DEBUG
+#define SMARTDASH_SERIAL_DEBUG 0
+#endif
+#if SMARTDASH_SERIAL_DEBUG
+#define SD_LOG(...)   Serial.printf(__VA_ARGS__)
+#define SD_LOGln(...) Serial.println(__VA_ARGS__)
+#else
+#define SD_LOG(...)   do {} while (0)
+#define SD_LOGln(...) do {} while (0)
+#endif
+
 // Display QSPI (ST77916)
 #define TFT_BLK  15
 #define TFT_RST  47

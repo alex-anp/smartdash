@@ -131,7 +131,7 @@ class ScanCB : public NimBLEScanCallbacks {
     if (targetAddr.length() > 0 && addr.equalsIgnoreCase(targetAddr)) match = true;
     if (!match && targetAddr.length() == 0 && compatible) match = true;
     if (match) {
-      Serial.printf("[ELM] match %s %s\n", addr.c_str(), name.c_str());
+      SD_LOG("[ELM] match %s %s\n", addr.c_str(), name.c_str());
       NimBLEDevice::getScan()->stop();
       if (advDevice) delete advDevice;
       advDevice = new NimBLEAdvertisedDevice(*d);
@@ -145,9 +145,9 @@ class ScanCB : public NimBLEScanCallbacks {
 };
 
 class ClientCB : public NimBLEClientCallbacks {
-  void onConnect(NimBLEClient*) override { Serial.println("[ELM] connected"); }
+  void onConnect(NimBLEClient*) override { SD_LOGln("[ELM] connected"); }
   void onDisconnect(NimBLEClient*, int) override {
-    Serial.println("[ELM] disconnected");
+    SD_LOGln("[ELM] disconnected");
     chrWrite = nullptr;
     chrNotify = nullptr;
     connected = false;
@@ -198,7 +198,7 @@ bool pickChars(NimBLEClient* c) {
   if (chrNotify && (chrNotify->canNotify() || chrNotify->canIndicate())) {
     chrNotify->subscribe(chrNotify->canNotify(), notifyCB);
   }
-  Serial.printf("[ELM] write=%s notify=%s\n", chrWrite ? chrWrite->getUUID().toString().c_str() : "-",
+  SD_LOG("[ELM] write=%s notify=%s\n", chrWrite ? chrWrite->getUUID().toString().c_str() : "-",
                 chrNotify ? chrNotify->getUUID().toString().c_str() : "-");
   return chrWrite != nullptr;
 }
@@ -291,7 +291,7 @@ void handleInit() {
   if (initState == INIT_WAIT) {
     String resp;
     if (!readCmdResult(resp)) return;
-    Serial.printf("[ELM] %s -> %s\n", initCmds[initIdx], resp.c_str());
+    SD_LOG("[ELM] %s -> %s\n", initCmds[initIdx], resp.c_str());
     initIdx++;
     if (initIdx >= INIT_N) {
       initState = INIT_DONE;
@@ -299,7 +299,7 @@ void handleInit() {
       setStatus(ElmStatus::Connected);
       dash.connected = true;
       pushData(dash);
-      Serial.println("[ELM] init done");
+      SD_LOGln("[ELM] init done");
     } else {
       initState = INIT_SEND;
     }
@@ -309,7 +309,7 @@ void handleInit() {
 void finishConnect() {
   if (!client) return;
   if (!pickChars(client)) {
-    Serial.println("[ELM] no usable chars");
+    SD_LOGln("[ELM] no usable chars");
     client->disconnect();
     connecting = false;
     setStatus(ElmStatus::Idle);
@@ -348,7 +348,7 @@ bool connectToAdv() {
     // Async connect returns immediately; blocking connect() could stall the
     // main loop for seconds and freeze the demo UI.
     if (!client->connect(addr, true, true, true)) {
-      Serial.println("[ELM] connect failed");
+      SD_LOGln("[ELM] connect failed");
       connecting = false;
       setStatus(ElmStatus::Idle);
       needScanRestart = true;
@@ -443,7 +443,7 @@ void elm_start_scan() {
   needScanRestart = false;
   clearFound();
   setStatus(ElmStatus::Scanning);
-  Serial.println("[ELM] scan start");
+  SD_LOGln("[ELM] scan start");
   requestScanStart = true;  // BLE task performs the blocking start()
 }
 
@@ -459,7 +459,7 @@ void elm_connect_saved(const String& addr) {
   needScanRestart = false;
   clearFound();
   setStatus(ElmStatus::Scanning);
-  Serial.printf("[ELM] scan for %s\n", addr.c_str());
+  SD_LOG("[ELM] scan for %s\n", addr.c_str());
   requestScanStart = true;
 }
 
@@ -469,7 +469,7 @@ void elm_connect(const String& addr) {
   doConnect = false;
   needScanRestart = false;
   setStatus(ElmStatus::Scanning);
-  Serial.printf("[ELM] connect to %s\n", addr.c_str());
+  SD_LOG("[ELM] connect to %s\n", addr.c_str());
   requestScanStart = true;
 }
 
@@ -488,10 +488,10 @@ void elm_loop() {
 
   if (connecting && client) {
     if (client->isConnected()) {
-      Serial.println("[ELM] async connect done");
+      SD_LOGln("[ELM] async connect done");
       finishConnect();
     } else if (millis() - connectStartedAt > CONNECT_TIMEOUT_MS) {
-      Serial.println("[ELM] async connect timeout");
+      SD_LOGln("[ELM] async connect timeout");
       client->cancelConnect();
       connecting = false;
       setStatus(ElmStatus::Idle);
@@ -516,7 +516,7 @@ void elm_loop() {
       lastScanRestart = now;
       needScanRestart = false;
       setStatus(ElmStatus::Scanning);
-      Serial.println("[ELM] restart scan");
+      SD_LOGln("[ELM] restart scan");
       NimBLEDevice::getScan()->start(SCAN_TIME_MS, false);
     }
   }

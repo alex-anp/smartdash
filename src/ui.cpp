@@ -398,10 +398,10 @@ void poll_touch() {
         touch.swipeHandled = true;
         touch.lastClick = now;
         if (dy < 0 && screen == Screen::Dash) {
-          Serial.println("[UI] swipe up -> ELM connect");
+          SD_LOGln("[UI] swipe up -> ELM connect");
           ui_show_elm_connect();
         } else if (dy > 0 && screen == Screen::ElmConnect) {
-          Serial.println("[UI] swipe down -> dash");
+          SD_LOGln("[UI] swipe down -> dash");
           ui_hide_elm_connect();
         }
       }
@@ -422,7 +422,7 @@ void poll_touch() {
 
   if (now - touch.startedAt < 800 && adx < 24 && ady < 24 && now - touch.lastClick > 250) {
     touch.lastClick = now;
-    Serial.printf("[UI] tap %d,%d\n", (int)touch.x, (int)touch.y);
+    SD_LOG("[UI] tap %d,%d\n", (int)touch.x, (int)touch.y);
     handle_tap(touch.x, touch.y);
   }
 }
@@ -432,7 +432,7 @@ void poll_button() {
   bool level = digitalRead(BTN_PIN) == LOW;
   if (level && !last && millis() - touch.lastClick > 250) {
     touch.lastClick = millis();
-    Serial.println("[UI] button press");
+    SD_LOGln("[UI] button press");
     if (screen == Screen::Dash) ui_show_elm_connect();
     else ui_hide_elm_connect();
   }
