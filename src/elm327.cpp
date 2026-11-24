@@ -1,6 +1,8 @@
 #include "elm327.h"
 
 #include <NimBLEDevice.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 #include <string.h>
 #include <vector>
 
@@ -22,18 +24,20 @@ NimBLEClient* client = nullptr;
 NimBLERemoteCharacteristic* chrWrite = nullptr;
 NimBLERemoteCharacteristic* chrNotify = nullptr;
 
-bool doConnect = false;
-bool connecting = false;
-bool connected = false;
-bool needScanRestart = false;
+volatile bool doConnect = false;
+volatile bool connecting = false;
+volatile bool connected = false;
+volatile bool needScanRestart = false;
+volatile bool requestScanStart = false;
 uint32_t lastScanRestart = 0;
 uint32_t connectStartedAt = 0;
 String pendingAddr;
-ElmStatus status = ElmStatus::Idle;
+volatile ElmStatus status = ElmStatus::Idle;
 
 ElmScanEntry found[MAX_FOUND];
 size_t foundCount = 0;
 portMUX_TYPE foundMux = portMUX_INITIALIZER_UNLOCKED;
+portMUX_TYPE rxMux = portMUX_INITIALIZER_UNLOCKED;
 
 void setStatus(ElmStatus s) { status = s; }
 
@@ -92,7 +96,9 @@ uint8_t cmdPidStep = 0;
 void pushData(const DashData& d) { ui_set_data(d); }
 
 void notifyCB(NimBLERemoteCharacteristic*, uint8_t* data, size_t len, bool) {
+  portENTER_CRITICAL(&rxMux);
   for (size_t i = 0; i < len; i++) rxBuf += (char)data[i];
+  portEXIT_CRITICAL(&rxMux);
 }
 
 bool isElmName(const std::string& name) {
@@ -199,7 +205,9 @@ bool pickChars(NimBLEClient* c) {
 
 bool sendCmdAsync(const String& cmd, uint32_t timeoutMs = CMD_TIMEOUT_MS) {
   if (!client || !client->isConnected() || !chrWrite || cmdState != CMD_IDLE) return false;
+  portENTER_CRITICAL(&rxMux);
   rxBuf = "";
+  portEXIT_CRITICAL(&rxMux);
   String out = cmd + "\r";
   bool ok = chrWrite->writeValue((uint8_t*)out.c_str(), out.length(), !chrWrite->canWrite());
   if (!ok) return false;
@@ -212,13 +220,19 @@ bool sendCmdAsync(const String& cmd, uint32_t timeoutMs = CMD_TIMEOUT_MS) {
 
 bool readCmdResult(String& resp) {
   if (cmdState != CMD_WAIT) return false;
+  String tmp;
+  bool ready = false;
+  portENTER_CRITICAL(&rxMux);
   if (rxBuf.indexOf('>') >= 0 || (millis() - cmdSentAt) > cmdTimeout) {
-    resp = rxBuf;
-    resp.replace('\r', '\n');
-    cmdState = CMD_IDLE;
-    return true;
+    tmp = rxBuf;
+    ready = true;
   }
-  return false;
+  portEXIT_CRITICAL(&rxMux);
+  if (!ready) return false;
+  resp = tmp;
+  resp.replace('\r', '\n');
+  cmdState = CMD_IDLE;
+  return true;
 }
 
 int hexByte(const String& s, int idx) {
@@ -254,7 +268,7 @@ bool parsePid(const String& resp, uint8_t service, uint8_t pid, std::vector<int>
 }
 
 enum InitState { INIT_IDLE, INIT_SEND, INIT_WAIT, INIT_DONE, INIT_FAIL };
-InitState initState = INIT_IDLE;
+volatile int initState = INIT_IDLE;
 int initIdx = 0;
 const char* initCmds[] = {"ATZ", "ATE0", "ATL0", "ATS0", "ATH0", "ATSP0", "0100"};
 constexpr int INIT_N = 7;
@@ -397,6 +411,8 @@ void handlePoll() {
 
 }  // namespace
 
+void elmTask(void*);
+
 void elm_init() {
   NimBLEDevice::init("SmartDash");
   NimBLEDevice::setPower(9);
@@ -407,6 +423,10 @@ void elm_init() {
   scan->setActiveScan(true);
   scan->setInterval(45);
   scan->setWindow(15);
+
+  // Keep all BLE work off the UI core: scan/connect calls can block for
+  // hundreds of milliseconds, which used to freeze touch and the demo.
+  xTaskCreatePinnedToCore(elmTask, "elm", 6144, nullptr, 1, nullptr, 0);
 }
 
 void elm_start_scan() {
@@ -424,7 +444,7 @@ void elm_start_scan() {
   clearFound();
   setStatus(ElmStatus::Scanning);
   Serial.println("[ELM] scan start");
-  NimBLEDevice::getScan()->start(SCAN_TIME_MS, false);
+  requestScanStart = true;  // BLE task performs the blocking start()
 }
 
 void elm_connect_saved(const String& addr) {
@@ -440,7 +460,7 @@ void elm_connect_saved(const String& addr) {
   clearFound();
   setStatus(ElmStatus::Scanning);
   Serial.printf("[ELM] scan for %s\n", addr.c_str());
-  NimBLEDevice::getScan()->start(SCAN_TIME_MS, false);
+  requestScanStart = true;
 }
 
 void elm_connect(const String& addr) {
@@ -450,10 +470,17 @@ void elm_connect(const String& addr) {
   needScanRestart = false;
   setStatus(ElmStatus::Scanning);
   Serial.printf("[ELM] connect to %s\n", addr.c_str());
-  NimBLEDevice::getScan()->start(SCAN_TIME_MS, false);
+  requestScanStart = true;
 }
 
 void elm_loop() {
+  if (requestScanStart) {
+    requestScanStart = false;
+    // This call can block for hundreds of milliseconds; it runs only in the
+    // BLE task, so the UI/touch loop is never held up by it.
+    NimBLEDevice::getScan()->start(SCAN_TIME_MS, false);
+  }
+
   if (doConnect) {
     doConnect = false;
     connectToAdv();
@@ -492,6 +519,13 @@ void elm_loop() {
       Serial.println("[ELM] restart scan");
       NimBLEDevice::getScan()->start(SCAN_TIME_MS, false);
     }
+  }
+}
+
+void elmTask(void*) {
+  for (;;) {
+    elm_loop();
+    vTaskDelay(pdMS_TO_TICKS(2));
   }
 }
 

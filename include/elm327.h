@@ -16,7 +16,6 @@ void elm_init();
 void elm_start_scan();
 void elm_connect_saved(const String& addr);
 void elm_connect(const String& addr);
-void elm_loop();
 bool elm_is_connected();
 
 // State and discovered devices for the on-screen ELM connection view.
