@@ -3,31 +3,32 @@
 
 #include <Arduino.h>
 
-// Public façade over the BLE worker task. All stateful BLE work happens inside
-// src/elm327.cpp on core 0; these functions are safe to call from the UI loop.
+// Публичный фасад над BLE-задачей. Вся работа с состоянием BLE происходит
+// внутри src/elm327.cpp на core 0, поэтому эти функции безопасно вызывать
+// из цикла UI.
 enum class ElmStatus {
-  Idle,          // No active connection attempt
-  Scanning,      // BLE scan in progress
-  Connecting,    // Async connect issued, waiting for peer
-  Initializing,  // Connected, sending AT init sequence
-  Connected      // Init done, OBD polling active
+  Idle,          // Нет активной попытки подключения
+  Scanning,      // Идёт сканирование BLE
+  Connecting,    // Асинхронное подключение отправлено, ждём ответа
+  Initializing,  // Подключены, отправляем AT-команды инициализации
+  Connected      // Инициализация завершена, идёт опрос OBD
 };
 
-// One row of the ELM Connect screen. Copied out under a mutex by elm_get_found().
+// Одна строка экрана ELM Connect. Копируется с мьютексом через elm_get_found().
 struct ElmScanEntry {
-  char address[24];  // BLE MAC as "AA:BB:CC:DD:EE:FF"
-  char name[40];     // Advertised name or "<unknown>"
-  int8_t rssi;       // Signal strength in dBm
-  bool compatible;   // Heuristic match by name / service UUID
+  char address[24];  // BLE MAC в виде "AA:BB:CC:DD:EE:FF"
+  char name[40];     // Широковещательное имя или "<unknown>"
+  int8_t rssi;       // Уровень сигнала в dBm
+  bool compatible;   // Эвристическое совпадение по имени / UUID сервиса
 };
 
-void elm_init();                            // Init NimBLE and spawn the worker task
-void elm_start_scan();                      // Disconnect current peer and rescan all devices
-void elm_connect_saved(const String& addr); // Scan specifically for the NVS-saved address
-void elm_connect(const String& addr);       // Save address, then scan/connect to it
-bool elm_is_connected();                    // True only after AT init finished
+void elm_init();                            // Инициализировать NimBLE и запустить задачу
+void elm_start_scan();                      // Отключиться и заново искать все устройства
+void elm_connect_saved(const String& addr); // Искать адрес, сохранённый в NVS
+void elm_connect(const String& addr);       // Сохранить адрес и подключиться к нему
+bool elm_is_connected();                    // true только после завершения AT-инициализации
 
-// State and discovered devices for the on-screen ELM connection view.
+// Состояние и найденные устройства для экрана подключения ELM.
 ElmStatus elm_status();
 size_t elm_get_found(ElmScanEntry* out, size_t max);
 

@@ -4,8 +4,9 @@
 #include <Arduino.h>
 #include <LovyanGFX.hpp>
 
-// display.cpp owns the board-specific LovyanGFX instance. UI code receives the
-// device through display_get() and optionally wraps drawing in a PSRAM sprite.
+// display.cpp владеет экземпляром LovyanGFX с настройками конкретной платы.
+// UI получает устройство через display_get() и при необходимости рисует
+// в спрайт, расположенный в PSRAM.
 LGFX_Device& display_get();
 void display_init();
 void display_clear(uint16_t color);

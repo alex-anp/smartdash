@@ -1,7 +1,7 @@
 /*
- * NVS storage for the last successfully connected BLE address.
- * Written by elm327.cpp after a successful characteristic discovery,
- * read once in setup() to decide between autoconnect and a full scan.
+ * Хранилище NVS для адреса последнего успешно подключённого BLE-устройства.
+ * elm327.cpp записывает его после удачного поиска характеристик,
+ * а setup() читает один раз, чтобы выбрать автоподключение или полный поиск.
  */
 #include "storage.h"
 
@@ -10,11 +10,11 @@ static const char* NS = "smartdash";
 static const char* KEY_LAST_ELM = "last_elm";
 
 void storage_init() {
-  prefs.begin(NS, false);  // Read/write namespace; committed implicitly by putString()
+  prefs.begin(NS, false);  // Namespace на чтение/запись; putString() фиксирует изменение
 }
 
 String storage_get_last_elm() {
-  return prefs.getString(KEY_LAST_ELM, "");  // Empty string means "never connected"
+  return prefs.getString(KEY_LAST_ELM, "");  // Пустая строка = «ещё не подключались»
 }
 
 void storage_save_last_elm(const String &addr) {

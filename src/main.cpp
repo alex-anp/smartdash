@@ -1,15 +1,15 @@
 /*
- * SmartDash - Honda Dunk AF78 OBD-II dashboard
+ * SmartDash — прибор Honda Dunk AF78 на базе OBD-II
  *
- * Board: JC3636W518C (ESP32-S3, 360x360 round IPS, ST77916 QSPI)
- * BT:    BLE only (ESP32-S3 has no Bluetooth Classic)
- * ELM:   ELM327-compatible adapter, auto-connect to the last saved MAC
- * UI:    Full-screen PSRAM sprite, one-shot startup sweep, swipe navigation
- * Config: Wi-Fi AP web interface (basic page implemented, forms are future work)
+ * Плата:   JC3636W518C (ESP32-S3, круглый IPS 360x360, ST77916 QSPI)
+ * BT:      только BLE (у ESP32-S3 нет Bluetooth Classic)
+ * ELM:     совместимый адаптер ELM327, автоподключение к последнему MAC
+ * UI:      полноэкранный спрайт в PSRAM, одноразовая анимация, навигация свайпами
+ * Настройки: Wi-Fi точка доступа (базовая страница, формы — в будущем)
  *
- * setup() is strictly sequential: NVS -> display -> UI -> AP -> BLE.
- * loop() stays lightweight; the blocking BLE state machine lives in elmTask
- * on core 0 (see src/elm327.cpp).
+ * setup() выполняется строго по порядку: NVS -> дисплей -> UI -> AP -> BLE.
+ * loop() остаётся лёгким: блокирующая логика BLE живёт в задаче elmTask
+ * на core 0 (см. src/elm327.cpp).
  */
 
 #include <Arduino.h>
@@ -22,20 +22,20 @@
 #include "web.h"
 
 void setup() {
-  // USB CDC is initialized even though runtime logging is compiled out by
-  // default; it is useful when SMARTDASH_SERIAL_DEBUG=1 is enabled.
+  // USB CDC инициализируем даже при отключённых логах: они понадобятся,
+  // если включить SMARTDASH_SERIAL_DEBUG=1.
   Serial.begin(115200);
   delay(100);
 
-  storage_init();  // Open NVS before anything asks for the saved ELM address
-  display_init();  // ST77916 + backlight + CST816S
-  ui_init();       // Allocate sprite and reset all render caches
-  ui_show_boot();  // Short splash before the dashboard appears
+  storage_init();  // Открыть NVS до первого чтения сохранённого адреса ELM
+  display_init();  // ST77916 + подсветка + CST816S
+  ui_init();       // Выделить спрайт и сбросить кэши отрисовки
+  ui_show_boot();  // Короткая заставка перед дашбордом
   delay(700);
-  web_init();      // Start SmartDash-<id> access point
-  elm_init();      // Start BLE worker task on core 0
+  web_init();      // Поднять точку доступа SmartDash-<id>
+  elm_init();      // Запустить BLE-задачу на core 0
 
-  // Auto-connect to last saved ELM327, or discover any compatible adapter.
+  // Автоподключение к сохранённому ELM327 или поиск любого совместимого адаптера.
   String last = storage_get_last_elm();
   if (last.length() > 0) {
     elm_connect_saved(last);
@@ -45,7 +45,7 @@ void setup() {
 }
 
 void loop() {
-  ui_loop();    // Input, startup sweep, status dots and dirty-widget rendering
-  web_loop();   // Handle one pending HTTP client, if any
-  delay(2);     // Yield to the scheduler; the 120 ms OBD poll is in elmTask
+  ui_loop();    // Ввод, стартовая анимация, точки статуса и перерисовка виджетов
+  web_loop();   // Обработать один ожидающий HTTP-запрос, если он есть
+  delay(2);     // Отдать управление планировщику; опрос OBD раз в 120 мс — в elmTask
 }

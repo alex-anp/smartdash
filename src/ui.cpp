@@ -1,16 +1,16 @@
 /*
- * Dashboard renderer and input handling.
+ * Отрисовка дашборда и обработка ввода.
  *
- * Layout is tuned for the 360x360 round panel:
- *   - outer arc  : continuous RPM indicator, radii 160..176, 150°..390°
- *   - inner scale: ticks every 1000 rpm, labels every 2000 rpm, radii 138..150
- *   - center     : seven-segment speed, 0..99 km/h
- *   - bottom     : coolant, voltage and ELM status
+ * Компоновка рассчитана на круглую панель 360x360:
+ *   - внешняя дуга : сплошной индикатор RPM, радиусы 160..176, 150°..390°
+ *   - внутренняя шкала: риски каждые 1000 об/мин, подписи каждые 2000, радиусы 138..150
+ *   - центр        : семисегментная скорость 0..99 км/ч
+ *   - низ          : температура, напряжение и статус ELM
  *
- * All drawing goes into a full-screen 16-bit PSRAM sprite when available. Only
- * changed widgets are repainted, then the sprite is pushed once per frame to
- * avoid tearing/flicker. Static scale geometry is drawn only on initialization
- * or after returning from the full-screen ELM Connect view.
+ * Если доступен полноэкранный 16-битный спрайт в PSRAM, весь вывод идёт в него.
+ * За кадр перерисовываются только изменившиеся виджеты, затем спрайт один раз
+ * выводится на панель — это убирает разрывы и мерцание. Статичная геометрия
+ * шкалы рисуется только при инициализации или после выхода из экрана ELM Connect.
  */
 #include "ui.h"
 
@@ -22,34 +22,34 @@
 
 namespace {
 
-// Outer indicator arc. Center is (180,180); 150° start puts 0 at lower-left,
-// 240° sweep ends at lower-right. The arc is intentionally continuous: earlier
-// segmented variants competed with the scale marks and were visually noisy.
+// Внешняя дуга индикатора. Центр (180,180); старт 150° ставит ноль внизу слева,
+// разворот 240° заканчивается внизу справа. Дуга намеренно сплошная: ранние
+// сегментированные варианты конфликтовали с рисками и выглядели шумно.
 constexpr int RPM_ARC_R_OUT = 176;
 constexpr int RPM_ARC_R_IN = 160;
-constexpr float RPM_ARC_START = 150.0f;  // 240 degrees total
+constexpr float RPM_ARC_START = 150.0f;  // всего 240 градусов
 constexpr float RPM_ARC_SWEEP = 240.0f;
 constexpr uint16_t RPM_ARC_BG_COLOR = 0x2104;
 
-// Separate inner scale: ticks every 1000 rpm, numbers every 2000 rpm.
-// Keeping it on a smaller radius makes it readable without touching the fill.
+// Отдельная внутренняя шкала: риски каждые 1000 об/мин, цифры каждые 2000.
+// Меньший радиус делает её читаемой и не задевает закрашенную дугу.
 constexpr int RPM_SCALE_R_OUT = 150;
 constexpr int RPM_SCALE_R_IN = 138;
 constexpr int RPM_SCALE_TICK_PX = 2;
 constexpr int RPM_SCALE_LABEL_R = 122;
 
-// Full-screen back buffer. PSRAM keeps the ~252 KB frame out of the limited
-// internal RAM; pushSprite() is the only direct-to-panel write per frame.
+// Полноэкранный back-буфер. PSRAM разгружает внутреннюю ОЗУ от кадра ~252 КБ;
+// pushSprite() — единственная прямая запись в панель за кадр.
 LGFX_Sprite canvas(&display_get());
 bool canvas_ok = false;
 
-DashData cur;       // Latest values (sweep or ELM)
-DashData drawn;     // What is currently painted in the sprite
-bool dirty = true;  // At least one widget differs from drawn
+DashData cur;       // Последние значения (анимация или ELM)
+DashData drawn;     // Что сейчас нарисовано в спрайте
+bool dirty = true;  // Хотя бы один виджет отличается от drawn
 bool static_drawn = false;
 
-// One-shot startup sweep instead of an endless demo. Runs only while ELM is not
-// connected; 40 steps x 100 ms = about 4 seconds, then all values stay at zero.
+// Одноразовая стартовая анимация вместо бесконечного демо. Идёт, только пока ELM
+// не подключён; 40 шагов × 100 мс ≈ 4 секунды, затем все значения остаются нулями.
 constexpr uint32_t SWEEP_INTERVAL_MS = 100;
 constexpr int SWEEP_STEPS = 40;
 uint32_t last_sweep_ms = 0;
@@ -59,8 +59,8 @@ bool sweep_done = false;
 enum class Screen { Dash, ElmConnect };
 Screen screen = Screen::Dash;
 
-// The three "searching" dots advance every 260 ms. The same phase drives the
-// ELM Connect header dots; drawn_dot_phase detects changes for partial redraw.
+// Три точки «поиска» сменяются каждые 260 мс. Та же фаза используется для точек
+// в заголовке ELM Connect; drawn_dot_phase нужен для частичной перерисовки.
 constexpr uint32_t DOT_PERIOD_MS = 260;
 uint32_t last_dot_ms = 0;
 int dot_phase = 0;
@@ -70,8 +70,8 @@ uint32_t last_elm_draw = 0;
 bool elm_screen_dirty = true;
 String connectTarget;
 
-// Touch state machine. Swipe is detected while the finger is still down (low
-// latency); a tap is only emitted on release if movement stayed under 24 px.
+// Конечный автомат тача. Свайп определяется, пока палец ещё на экране (маленькая
+// задержка); тап формируется только при отпускании и смещении менее 24 px.
 struct TouchInput {
   bool pressed = false;
   bool swipeHandled = false;
@@ -84,23 +84,23 @@ struct TouchInput {
 };
 TouchInput touch;
 
-// Linear RPM -> angle mapping, clamped to the configured full scale.
+// Линейное преобразование RPM в угол с ограничением по RPM_MAX.
 float rpm_angle(int rpm) {
   rpm = constrain(rpm, 0, RPM_MAX);
   return RPM_ARC_START + RPM_ARC_SWEEP * ((float)rpm / (float)RPM_MAX);
 }
 
-// Draw target: sprite when available, panel directly as a fallback.
+// Цель отрисовки: спрайт, если он создан; иначе панель напрямую.
 lgfx::LGFX_Device& g() { return canvas_ok ? (lgfx::LGFX_Device&)canvas : display_get(); }
 
-// One atomic frame update. No-op when the sprite was not allocated.
+// Атомарный вывод кадра. Если спрайт не создан — ничего не делаем.
 void flush() {
   if (!canvas_ok) return;
   canvas.pushSprite(0, 0);
 }
 
-// Three dots centered on cx. Exactly one is active, giving a simple "working"
-// animation without a frame or spinner.
+// Три точки по центру cx. Активна ровно одна — простая анимация «работает»
+// без рамки и вращающегося индикатора.
 void draw_status_dots(lgfx::LGFX_Device& d, int cx, int y, uint16_t active, uint16_t inactive, int phase) {
   for (int i = 0; i < 3; i++) {
     bool lit = (i == phase);
@@ -112,8 +112,8 @@ bool in_rect(int32_t x, int32_t y, int x0, int y0, int x1, int y1) {
   return x >= x0 && x <= x1 && y >= y0 && y <= y1;
 }
 
-// Unfilled portion of the tachometer. Called both from draw_static() and before
-// every RPM repaint, because fillArc() overwrites the previous colored arc.
+// Незакрашенная часть тахометра. Вызывается и из draw_static(), и перед каждой
+// перерисовкой RPM, потому что fillArc() затирает предыдущую цветную дугу.
 void draw_arc_bg() {
   auto& d = g();
   d.fillArc(SCREEN_CENTER_X, SCREEN_CENTER_Y, RPM_ARC_R_OUT, RPM_ARC_R_IN, RPM_ARC_START,
@@ -123,14 +123,14 @@ void draw_arc_bg() {
 void draw_rpm_scale() {
   auto& d = g();
 
-  // Static scale geometry. It is painted once into the sprite and never touched
-  // by draw_rpm(), which only writes to the outer radii 160..176.
+  // Статичная геометрия шкалы. Рисуется один раз в спрайт и больше не трогается:
+  // draw_rpm() работает только с внешними радиусами 160..176.
   //
-  // Thin reference arc inside the rpm indicator arc.
+  // Тонкая опорная дуга внутри дуги индикатора.
   d.fillArc(SCREEN_CENTER_X, SCREEN_CENTER_Y, RPM_SCALE_R_OUT, RPM_SCALE_R_OUT - 1,
             RPM_ARC_START, RPM_ARC_START + RPM_ARC_SWEEP, 0x4208);
 
-  // One thin tick per 1000 rpm, fully separated from the outer arc.
+  // Одна тонкая риска на каждые 1000 об/мин, полностью отделена от внешней дуги.
   for (int rpm = 0; rpm <= RPM_MAX; rpm += 1000) {
     float a = rpm_angle(rpm) * (float)M_PI / 180.0f;
     float ca = cosf(a), sa = sinf(a);
@@ -148,7 +148,7 @@ void draw_rpm_scale() {
     }
   }
 
-  // Numbers every 2000 rpm.
+  // Цифры каждые 2000 об/мин (в тысячах).
   d.setTextDatum(middle_center);
   d.setTextColor(TFT_WHITE, TFT_BLACK);
   for (int k = 0; k <= RPM_MAX / 1000; k += 2) {
@@ -161,14 +161,14 @@ void draw_rpm_scale() {
   }
 }
 
-// Paint the continuous indicator from 0 up to current rpm. Zones are painted
-// sequentially; each fillArc() segment is clipped to [zone.from, zone.to].
+// Закрашиваем сплошной индикатор от нуля до текущих RPM. Зоны рисуются по очереди;
+// каждый сегмент fillArc() ограничен интервалом [zone.from, zone.to].
 void draw_rpm(int rpm) {
   rpm = constrain(rpm, 0, RPM_MAX);
   auto& d = g();
   draw_arc_bg();
   if (rpm > 0) {
-    // Colors follow config.h: green up to redline, orange to 10k, red to 12k.
+    // Цвета из config.h: зелёный до красной зоны, оранжевый до 10k, красный до 12k.
     struct Zone { int from; int to; uint16_t color; };
     static const Zone zones[] = {
       {0, RPM_REDLINE, TFT_GREEN},
@@ -185,8 +185,8 @@ void draw_rpm(int rpm) {
   }
 }
 
-// Seven-segment digit built from rounded rectangles. Segment bit masks are the
-// classic abcdefg layout: bit0=A (top), bit1=B (upper-right), ... bit6=G (middle).
+// Семисегментная цифра из скруглённых прямоугольников. Битовые маски — классическая
+// раскладка abcdefg: бит0=A (верх), бит1=B (верхний правый), ... бит6=G (середина).
 void draw_seg_digit(lgfx::LGFX_Device& d, int x, int y, int w, int h, int t, int digit, uint16_t on, uint16_t off) {
   static const uint8_t seg[10] = {0x3F, 0x06, 0x5B, 0x4F, 0x66, 0x6D, 0x7D, 0x07, 0x7F, 0x6F};
   uint8_t m = (digit >= 0 && digit <= 9) ? seg[digit] : 0;
@@ -204,8 +204,9 @@ void draw_seg_digit(lgfx::LGFX_Device& d, int x, int y, int w, int h, int t, int
   d.fillRoundRect(x + t + gap, mid, w - 2 * t - 2 * gap, t, r, col(m & 0x40));               // G
 }
 
-// Speed readout. A black patch is repainted first so old segments disappear when
-// values shrink (e.g. 99 -> 1). Values 0..9 use one centered digit on purpose.
+// Блок скорости. Сначала перекрашиваем чёрную область, чтобы старые сегменты
+// исчезали при уменьшении значения (например, 99 -> 1). Значения 0..9 намеренно
+// рисуются одной цифрой по центру.
 void draw_speed(int speed) {
   auto& d = g();
   speed = constrain(speed, 0, 99);
@@ -226,8 +227,8 @@ void draw_speed(int speed) {
   int d2 = speed % 10;
 
   if (d1 == 0) {
-    // Keep 0..9 (especially zero after the startup sweep) clearly centered
-    // instead of leaving the tens digit blank and showing only a shifted digit.
+    // Оставляем 0..9 (особенно ноль после анимации) явно по центру, а не с
+    // пустым разрядом десятков и смещённой влево единственной цифрой.
     draw_seg_digit(d, SCREEN_CENTER_X - digitW / 2, y0, digitW, digitH, segT, d2, on, off);
   } else {
     draw_seg_digit(d, x0, y0, digitW, digitH, segT, d1, on, off);
@@ -239,7 +240,7 @@ void draw_speed(int speed) {
   d.drawString("km/h", SCREEN_CENTER_X, y0 + digitH + 18, 4);
 }
 
-// Small outline icons paired with numeric values at the bottom of the dial.
+// Маленькие контурные иконки рядом с числами в нижней части циферблата.
 void draw_temp_icon(int x, int y, uint16_t c) {
   auto& d = g();
   d.drawRoundRect(x - 4, y - 12, 8, 16, 3, c);
@@ -259,8 +260,8 @@ void draw_batt_icon(int x, int y, uint16_t c) {
   d.drawFastHLine(x + 1, y, 5, c);
 }
 
-// Bottom strip: coolant left, voltage right, ELM status centered below them.
-// Colors use fixed thresholds so the rider can read state without numbers.
+// Нижняя полоса: температура слева, напряжение справа, статус ELM ниже по центру.
+// Цвета по фиксированным порогам, чтобы состояние читалось без цифр.
 void draw_bottom(int coolant_c, float volt, bool connected) {
   auto& d = g();
   d.fillRect(30, 278, 300, 60, TFT_BLACK);
@@ -294,7 +295,7 @@ void draw_bottom(int coolant_c, float volt, bool connected) {
   else snprintf(vbuf, sizeof(vbuf), "%.1fV", volt);
   d.drawString(vbuf, 238, 298, 4);
 
-  // ELM status indicator. Three dots light up in turn while connecting.
+  // Индикатор ELM: три точки загораются по очереди во время подключения.
   if (connected) {
     d.setTextDatum(middle_center);
     d.setTextColor(TFT_GREEN, TFT_BLACK);
@@ -307,8 +308,8 @@ void draw_bottom(int coolant_c, float volt, bool connected) {
   }
 }
 
-// One-time background: black fill, thin outer circle, unlit RPM arc and inner
-// scale. Dynamic widgets are layered on top by ui_show_dash().
+// Однократный фон: чёрная заливка, тонкая внешняя окружность, не закрашенная дуга
+// RPM и внутренняя шкала. Динамические виджеты накладывает ui_show_dash().
 void draw_static() {
   auto& d = g();
   d.fillScreen(TFT_BLACK);
@@ -319,8 +320,8 @@ void draw_static() {
   dirty = true;
 }
 
-// Human-readable status line for the ELM Connect screen. Includes the MAC when
-// a specific target was requested, so failed connects are easy to identify.
+// Человекочитаемая строка статуса для ELM Connect. Если задан конкретный адрес,
+// он добавлен в текст — так проще понять, какое подключение не удалось.
 String elm_status_text(ElmStatus s) {
   switch (s) {
     case ElmStatus::Idle:         return "Idle";
@@ -332,8 +333,8 @@ String elm_status_text(ElmStatus s) {
   return "";
 }
 
-// Full-screen connection helper. All content is kept inside the inscribed circle
-// of the round display; up to five BLE results are shown with RSSI coloring.
+// Полноэкранный экран подключения. Весь контент держится внутри вписанной окружности;
+// показывается до пяти результатов BLE с цветом по уровню RSSI.
 void draw_elm_screen() {
   auto& d = g();
   ElmStatus st = elm_status();
@@ -341,8 +342,8 @@ void draw_elm_screen() {
   d.fillScreen(TFT_BLACK);
   d.setTextDatum(middle_center);
 
-  // Round screen: usable width shrinks near the top and bottom edges.
-  // Keep all content inside the inscribed circle (radius ~175 from center 180,180).
+  // Круглый экран: у верхнего и нижнего краёв доступная ширина меньше.
+  // Держим всё внутри вписанной окружности (радиус ~175 от центра 180,180).
   d.setTextColor(TFT_WHITE, TFT_BLACK);
   d.drawString("ELM Connect", SCREEN_CENTER_X, 38, 4);
 
@@ -379,7 +380,7 @@ void draw_elm_screen() {
       d.setTextColor(TFT_WHITE, bg);
       d.drawString(name, 50, y0 + 9, 2);
 
-      // Short MAC (last 8 chars) on a smaller second line.
+      // Короткий MAC (последние 8 символов) меньшим шрифтом на второй строке.
       const char* shortAddr = e.address;
       size_t len = strlen(shortAddr);
       if (len > 8) shortAddr += len - 8;
@@ -404,10 +405,10 @@ void draw_elm_screen() {
   flush();
 }
 
-// Tap targets on the ELM screen only. Dash taps are ignored; navigation there is
-// by swipe/button to avoid accidental mode changes while riding.
+// Тап-зоны только на экране ELM. На дашборде тапы игнорируются: навигация там
+// свайпом или кнопкой, чтобы во время езды случайно не сменить режим.
 void handle_tap(int32_t x, int32_t y) {
-  if (screen == Screen::Dash) return;  // Swipe up opens the ELM screen.
+  if (screen == Screen::Dash) return;  // Свайп вверх открывает экран ELM.
 
   if (in_rect(x, y, 130, 94, 230, 122)) {
     connectTarget = "";
@@ -427,8 +428,8 @@ void handle_tap(int32_t x, int32_t y) {
   }
 }
 
-// CST816S polling. A vertical swipe of >=60 px within 1 s switches screens;
-// adx control keeps diagonal finger drags from being treated as swipes.
+// Опрос CST816S. Вертикальный свайп >=60 px за 1 с переключает экраны;
+// проверка adx не даёт принять диагональное движение за свайп.
 void poll_touch() {
   int32_t x = 0, y = 0;
   uint_fast8_t count = display_get().getTouch(&x, &y);
@@ -444,8 +445,8 @@ void poll_touch() {
     touch.x = x;
     touch.y = y;
 
-    // Detect the swipe as soon as the threshold is crossed, while the finger
-    // is still moving -- waiting for release adds noticeable lag.
+    // Определяем свайп сразу после превышения порога, пока палец ещё движется:
+    // ожидание отпускания добавляет заметную задержку.
     if (!touch.swipeHandled) {
       int32_t dx = x - touch.startX;
       int32_t dy = y - touch.startY;
@@ -486,8 +487,8 @@ void poll_touch() {
   }
 }
 
-// BOOT pin acts as a fallback navigation button (active low, INPUT_PULLUP).
-// It shares the tap debounce window with touch to avoid double events.
+// Пин BOOT — резервная кнопка навигации (активный низкий уровень, INPUT_PULLUP).
+// Использует тот же интервал подавления дребезга, что и тач, чтобы не было двойных событий.
 void poll_button() {
   static bool last = true;
   bool level = digitalRead(BTN_PIN) == LOW;
@@ -502,8 +503,8 @@ void poll_button() {
 
 }  // namespace
 
-// Allocate the sprite and prime drawn cache with impossible values so the first
-// ui_show_dash() repaints every widget, including a visible zero speed.
+// Выделяем спрайт и заполняем кэш отрисовки невозможными значениями, чтобы первая
+// же ui_show_dash() перерисовала все виджеты, включая видимый ноль скорости.
 void ui_init() {
   pinMode(BTN_PIN, INPUT_PULLUP);
   if (!canvas_ok) {
@@ -526,14 +527,14 @@ void ui_init() {
   sweep_done = false;
 }
 
-// Called from the BLE task. Only stores the snapshot and raises dirty; actual
-// drawing stays on the UI core, so there is no cross-thread LGFX access.
+// Вызывается из BLE-задачи. Только сохраняет снимок и поднимает флаг dirty;
+// сама отрисовка остаётся на ядре UI, поэтому LGFX не используется из двух потоков.
 void ui_set_data(const DashData& data) {
   cur = data;
   dirty = true;
 }
 
-// Startup splash shown for 700 ms before the first dashboard frame.
+// Стартовая заставка на 700 мс перед первым кадром дашборда.
 void ui_show_boot() {
   auto& d = g();
   d.fillScreen(TFT_BLACK);
@@ -545,8 +546,8 @@ void ui_show_boot() {
   flush();
 }
 
-// Simple status screen kept for compatibility/debug; the normal flow goes
-// straight from boot to the dashboard with blinking ELM dots.
+// Простой экран статуса оставлен для совместимости/отладки; обычный сценарий
+// идёт от заставки сразу к дашборду с мигающими точками ELM.
 void ui_show_search() {
   auto& d = g();
   d.fillScreen(TFT_BLACK);
@@ -556,29 +557,29 @@ void ui_show_search() {
   flush();
 }
 
-// Open ELM Connect. A fresh scan is only started if no live link exists, so
-// viewing the screen while connected doesn't tear down an active OBD session.
+// Открываем ELM Connect. Новый поиск запускается только если нет активной связи,
+// поэтому просмотр экрана при подключении не рвёт сессию OBD.
 void ui_show_elm_connect() {
   if (screen == Screen::ElmConnect) return;
   screen = Screen::ElmConnect;
   connectTarget = "";
   elm_screen_dirty = true;
   last_elm_draw = 0;
-  // Refresh the device list unless we already have a live ELM connection.
+  // Обновляем список устройств, только если нет работающего соединения с ELM.
   if (!elm_is_connected()) elm_start_scan();
   draw_elm_screen();
 }
 
-// Return to the dashboard. The ELM screen overwrote the whole sprite, so both
-// static background and all dynamic values must be forced through a redraw.
+// Возврат на дашборд. Экран ELM перезаписал весь спрайт, поэтому и статический фон,
+// и все динамические значения нужно принудительно перерисовать.
 void ui_hide_elm_connect() {
   if (screen == Screen::Dash) return;
   screen = Screen::Dash;
-  static_drawn = false;  // ELM screen overwrote the sprite
+  static_drawn = false;  // Экран ELM перезаписал спрайт
 
-  // The cached values still match cur, so ui_show_dash() would skip every
-  // dynamic element after redrawing only the static background. Force a full
-  // redraw of all gauges after returning from the ELM screen.
+  // Кэшированные значения всё ещё равны cur, поэтому после перерисовки одного фона
+  // ui_show_dash() пропустила бы все динамические элементы. Принудительно обновляем
+  // все шкалы после возврата с экрана ELM.
   drawn.rpm = -999;
   drawn.speed_kmh = -999;
   drawn.coolant_c = -999;
@@ -589,8 +590,8 @@ void ui_hide_elm_connect() {
   ui_show_dash();
 }
 
-// Dirty-widget renderer. Each widget has its own cache comparison to avoid
-// repainting the RPM arc when only voltage or the status dot changed.
+// Рендер по «грязным» виджетам. У каждого виджета своё сравнение с кэшем, чтобы
+// при изменении только напряжения или точки статуса не перерисовывать дугу RPM.
 void ui_show_dash() {
   if (!static_drawn) draw_static();
 
@@ -616,8 +617,8 @@ void ui_show_dash() {
   flush();
 }
 
-// Main UI tick. Order matters: input may switch screens, then the active screen
-// is rendered. Real ELM data stops the startup sweep immediately.
+// Основной тик UI. Порядок важен: сначала ввод может сменить экран, затем
+// отрисовывается активный. Данные от реального ELM сразу останавливают анимацию.
 void ui_loop() {
   uint32_t now = millis();
   bool connected = elm_is_connected();
@@ -634,11 +635,11 @@ void ui_loop() {
     // RPM: 0 -> RPM_MAX -> 0.
     cur.rpm = (s <= half) ? (RPM_MAX * s / half)
                           : (RPM_MAX * (SWEEP_STEPS - s) / half);
-    // Speed: 99 -> 0.
+    // Скорость: 99 -> 0.
     cur.speed_kmh = 99 * (SWEEP_STEPS - s) / SWEEP_STEPS;
-    // Coolant: 99 -> 0 in 5-degree steps.
+    // Температура: 99 -> 0 шагами по 5 градусов.
     cur.coolant_c = 99 - min(s * 5 / 2, 99);
-    // Voltage: 16.0 -> 0 in 0.5 V steps.
+    // Напряжение: 16.0 -> 0 шагами по 0.5 В.
     float volt = 16.0f - s * 0.5f;
     cur.volt = volt > 0.0f ? volt : 0.0f;
     cur.connected = false;
@@ -662,7 +663,7 @@ void ui_loop() {
   }
 
   if (screen == Screen::ElmConnect) {
-    // Full-screen push costs ~50 ms; avoid doing it on every dot tick.
+    // Вывод всего экрана стоит ~50 мс; не делаем его на каждый шаг точек.
     if (elm_screen_dirty || now - last_elm_draw >= 600) {
       last_elm_draw = now;
       elm_screen_dirty = false;

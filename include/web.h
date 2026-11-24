@@ -3,8 +3,8 @@
 
 #include <Arduino.h>
 
-// Wi-Fi access point and HTTP server. web_loop() must be called regularly from
-// loop() so pending client requests are handled without blocking the UI.
+// Точка доступа Wi-Fi и HTTP-сервер. web_loop() нужно регулярно вызывать
+// из loop(), чтобы запросы обрабатывались без блокировки UI.
 void web_init();
 void web_loop();
 

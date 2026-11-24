@@ -1,10 +1,10 @@
 /*
- * Board-specific LovyanGFX configuration for JC3636W518C.
+ * Конфигурация LovyanGFX под плату JC3636W518C.
  *
- * The display is a 360x360 ST77916 connected through a 4-lane SPI bus (QSPI).
- * The panel is marked non-readable: writes are fast, pixel reads are not used.
- * Backlight is PWM-controlled and the CST816S touch controller shares this
- * LGFX instance, so getTouch() works through display_get().
+ * Дисплей — ST77916 360x360, подключённый по 4-линейному SPI (QSPI).
+ * Панель помечена как нечитаемая: запись быстрая, чтение пикселей не используется.
+ * Подсветка управляется через PWM, а контроллер тача CST816S входит в тот же
+ * экземпляр LGFX, поэтому getTouch() доступен через display_get().
  */
 #include "display.h"
 #include "config.h"
@@ -20,8 +20,8 @@ class LGFX : public lgfx::LGFX_Device {
  public:
   LGFX() {
     {
-      // QSPI bus: one clock plus four data lines defined in config.h.
-      // 40 MHz write / 16 MHz read is the vendor-proven combination for this panel.
+      // Шина QSPI: одна линия такта и четыре линии данных из config.h.
+      // 40 МГц на запись / 16 МГц на чтение — проверенная комбинация для этой панели.
       auto cfg = _bus.config();
       cfg.spi_host = SPI2_HOST;
       cfg.spi_mode = 0;
@@ -40,8 +40,8 @@ class LGFX : public lgfx::LGFX_Device {
     }
 
     {
-      // ST77916 geometry: 360x360, inverted, RGB byte order, no readback.
-      // dummy_read_* values and bus_shared=false come from the vendor demo.
+      // Геометрия ST77916: 360x360, инверсия, порядок RGB, без чтения назад.
+      // Значения dummy_read_* и bus_shared=false взяты из демо производителя.
       auto cfg = _panel.config();
       cfg.pin_cs = TFT_CS;
       cfg.pin_rst = TFT_RST;
@@ -64,7 +64,7 @@ class LGFX : public lgfx::LGFX_Device {
     }
 
     {
-      // PWM backlight. display_set_brightness() converts percent to 0..255.
+      // Подсветка через PWM. display_set_brightness() переводит проценты в 0..255.
       auto cfg = _light.config();
       cfg.pin_bl = TFT_BLK;
       cfg.invert = false;
@@ -75,10 +75,10 @@ class LGFX : public lgfx::LGFX_Device {
     }
 
     {
-      // CST816S on I2C0. INT/RST pins let the controller wake and reset cleanly.
+      // CST816S на I2C0. Линии INT/RST позволяют корректно будить и сбрасывать контроллер.
       auto cfg = _touch.config();
       cfg.i2c_port = 0;
-      cfg.i2c_addr = 0x15;  // CST816S default
+      cfg.i2c_addr = 0x15;  // адрес CST816S по умолчанию
       cfg.pin_sda = TOUCH_PIN_NUM_I2C_SDA;
       cfg.pin_scl = TOUCH_PIN_NUM_I2C_SCL;
       cfg.pin_int = TOUCH_PIN_NUM_INT;
@@ -104,9 +104,9 @@ LGFX gfx;
 LGFX_Device& display_get() { return gfx; }
 
 void display_init() {
-  gfx.init();          // Applies all panel/bus/light/touch settings above
+  gfx.init();              // Применяет все настройки панели/шины/подсветки/тача выше
   gfx.setRotation(0);
-  gfx.setBrightness(200);  // ~78%: bright enough outdoors, not full white
+  gfx.setBrightness(200);  // ~78%: достаточно ярко на улице, но не максимальный белый
   gfx.fillScreen(TFT_BLACK);
   gfx.setTextColor(TFT_GREEN, TFT_BLACK);
   gfx.setTextDatum(middle_center);

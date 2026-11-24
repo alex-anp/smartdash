@@ -1,19 +1,19 @@
 #ifndef CONFIG_H
 #define CONFIG_H
 
-// Single source of truth for board pins, display geometry and vehicle limits.
-// Keep runtime-tunable values here instead of spreading magic numbers across
-// the UI and BLE modules.
+// Единый источник правды для пинов платы, геометрии экрана и параметров мотоцикла.
+// Значения, которые потенциально могут настраиваться, лучше держать здесь, а не
+// разбрасывать "магические числа" по модулям UI и BLE.
 //
-// Board: JC3636W518C (ESP32-S3R8, 1.8" round 360x360 IPS, ST77916 QSPI, CST816S touch)
-// Pins from vendor demo: JC3636W518EN/2-Program Example/Demo_Arduino_V1.0/ST77916_LVGL_DEMO/pincfg.h
+// Плата: JC3636W518C (ESP32-S3R8, 1.8" круглый IPS 360x360, ST77916 QSPI, CST816S touch)
+// Пины из демо производителя: JC3636W518EN/2-Program Example/Demo_Arduino_V1.0/ST77916_LVGL_DEMO/pincfg.h
 
 #define SCREEN_WIDTH  360
 #define SCREEN_HEIGHT 360
 
-// USB CDC printf can block the calling task for hundreds of milliseconds.
-// Runtime logging is therefore disabled by default; enable only for debugging
-// with -DSMARTDASH_SERIAL_DEBUG=1.
+// Serial.printf через USB CDC может блокировать задачу на сотни миллисекунд.
+// Поэтому служебные логи по умолчанию отключены; включать только для отладки
+// через -DSMARTDASH_SERIAL_DEBUG=1.
 #ifndef SMARTDASH_SERIAL_DEBUG
 #define SMARTDASH_SERIAL_DEBUG 0
 #endif
@@ -25,7 +25,7 @@
 #define SD_LOGln(...) do {} while (0)
 #endif
 
-// Display QSPI (ST77916)
+// Дисплей QSPI (ST77916)
 #define TFT_BLK  15
 #define TFT_RST  47
 #define TFT_CS   10
@@ -35,36 +35,36 @@
 #define TFT_SDA2 13
 #define TFT_SDA3 14
 
-// Touch I2C (CST816S). Physical controller lives on I2C port 0; touch is used
-// for swipes and selecting an ELM device, while configuration stays in Wi-Fi AP.
+// Тач I2C (CST816S). Контроллер сидит на порту I2C 0; тач используется для
+// свайпов и выбора адаптера ELM, а настройки остаются в Wi-Fi AP.
 #define TOUCH_PIN_NUM_I2C_SCL 8
 #define TOUCH_PIN_NUM_I2C_SDA 7
 #define TOUCH_PIN_NUM_INT     41
 #define TOUCH_PIN_NUM_RST     40
 
-// Button
+// Кнопка
 #define BTN_PIN 0
 
-// Wi-Fi AP for web config
+// Wi-Fi точка доступа для веб-настроек
 #define WIFI_AP_SSID "SmartDash"
 #define WIFI_AP_PASS "smartdash"
 
-// Vehicle specific
+// Параметры мотоцикла
 #define VEHICLE_NAME "Honda Dunk AF78"
 #define RPM_REDLINE 8000
-#define RPM_MAX 12000  // tachometer full scale
+#define RPM_MAX 12000  // верхняя граница тахометра
 
-// Units. The current renderer is fixed to km/h and °C; these flags document
-// the intended direction for a future configurable web UI.
+// Единицы измерения. Сейчас рендер зафиксирован на km/h и °C; эти флаги
+// фиксируют направление для будущего веб-интерфейса настроек.
 #define USE_KMH true
 #define USE_CELSIUS true
 
-// ELM. Auto-connect uses the address stored in NVS; the reconnect gap in
-// src/elm327.cpp is kept separate so the BLE task can react without an API call.
+// ELM. Автоподключение использует адрес из NVS; интервал переподключения в
+// src/elm327.cpp задан отдельно, чтобы BLE-задача реагировала без вызова API.
 #define ELM_AUTO_CONNECT true
 #define ELM_RECONNECT_INTERVAL 3000
 
-// UI
+// Геометрия UI
 #define SCREEN_CENTER_X (SCREEN_WIDTH / 2)
 #define SCREEN_CENTER_Y (SCREEN_HEIGHT / 2)
 #define SCREEN_RADIUS   (SCREEN_WIDTH / 2)
