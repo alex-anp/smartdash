@@ -13,7 +13,7 @@ constexpr int RPM_ARC_R_IN = 160;
 constexpr float RPM_ARC_START = 150.0f;  // 240 degrees total
 constexpr float RPM_ARC_SWEEP = 240.0f;
 constexpr int RPM_SEGMENT_RPM = 250;  // 0.25k rpm per indicator segment
-constexpr int RPM_SEGMENT_GAP_PX = 6;
+constexpr int RPM_SEGMENT_GAP_PX = 8;
 constexpr uint16_t RPM_ARC_BG_COLOR = 0x2104;
 
 LGFX_Sprite canvas(&display_get());
