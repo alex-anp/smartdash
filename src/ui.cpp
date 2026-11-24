@@ -12,8 +12,6 @@ constexpr int RPM_ARC_R_OUT = 176;
 constexpr int RPM_ARC_R_IN = 160;
 constexpr float RPM_ARC_START = 150.0f;  // 240 degrees total
 constexpr float RPM_ARC_SWEEP = 240.0f;
-constexpr int RPM_SEGMENT_RPM = 200;  // 0.2k rpm per indicator segment
-constexpr int RPM_SEGMENT_GAP_PX = 8;
 constexpr uint16_t RPM_ARC_BG_COLOR = 0x2104;
 
 // Separate inner scale: ticks every 1000 rpm, numbers every 2000 rpm.
@@ -84,36 +82,16 @@ bool in_rect(int32_t x, int32_t y, int x0, int y0, int x1, int y1) {
   return x >= x0 && x <= x1 && y >= y0 && y <= y1;
 }
 
-void draw_rpm_segment_gaps() {
-  auto& d = g();
-  for (int r = RPM_SEGMENT_RPM; r < RPM_MAX; r += RPM_SEGMENT_RPM) {
-    float a = rpm_angle(r) * (float)M_PI / 180.0f;
-    float ca = cosf(a), sa = sinf(a);
-    float nx = -sa, ny = ca;
-    int x1 = SCREEN_CENTER_X + (int)(ca * RPM_ARC_R_IN);
-    int y1 = SCREEN_CENTER_Y + (int)(sa * RPM_ARC_R_IN);
-    int x2 = SCREEN_CENTER_X + (int)(ca * RPM_ARC_R_OUT);
-    int y2 = SCREEN_CENTER_Y + (int)(sa * RPM_ARC_R_OUT);
-    // Centered tangential gap shared by the background and the filled indicator.
-    for (int off = -RPM_SEGMENT_GAP_PX / 2; off < (RPM_SEGMENT_GAP_PX + 1) / 2; off++) {
-      int ox = (int)(nx * off);
-      int oy = (int)(ny * off);
-      d.drawLine(x1 + ox, y1 + oy, x2 + ox, y2 + oy, TFT_BLACK);
-    }
-  }
-}
-
 void draw_arc_bg() {
   auto& d = g();
   d.fillArc(SCREEN_CENTER_X, SCREEN_CENTER_Y, RPM_ARC_R_OUT, RPM_ARC_R_IN, RPM_ARC_START,
             RPM_ARC_START + RPM_ARC_SWEEP, RPM_ARC_BG_COLOR);
-  draw_rpm_segment_gaps();
 }
 
 void draw_rpm_scale() {
   auto& d = g();
 
-  // Thin reference arc inside the segmented indicator arc.
+  // Thin reference arc inside the rpm indicator arc.
   d.fillArc(SCREEN_CENTER_X, SCREEN_CENTER_Y, RPM_SCALE_R_OUT, RPM_SCALE_R_OUT - 1,
             RPM_ARC_START, RPM_ARC_START + RPM_ARC_SWEEP, 0x4208);
 
@@ -166,9 +144,6 @@ void draw_rpm(int rpm) {
                 rpm_angle(z.from), rpm_angle(segEnd), z.color);
       if (rpm <= z.to) break;
     }
-
-    // Cut the same dark gaps in the filled arc so lit and unlit segments align.
-    draw_rpm_segment_gaps();
   }
 }
 
