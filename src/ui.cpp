@@ -12,11 +12,15 @@ constexpr int RPM_ARC_R_OUT = 176;
 constexpr int RPM_ARC_R_IN = 160;
 constexpr float RPM_ARC_START = 150.0f;  // 240 degrees total
 constexpr float RPM_ARC_SWEEP = 240.0f;
-constexpr int RPM_SEGMENT_RPM = 250;  // 0.25k rpm per indicator segment
+constexpr int RPM_SEGMENT_RPM = 200;  // 0.2k rpm per indicator segment
 constexpr int RPM_SEGMENT_GAP_PX = 8;
-constexpr int RPM_TICK_THICK_PX = RPM_SEGMENT_GAP_PX;  // 1000 rpm tick fills the gap
-constexpr int RPM_TICK_THIN_PX = 4;                    // 500 rpm tick leaves dark edges
 constexpr uint16_t RPM_ARC_BG_COLOR = 0x2104;
+
+// Separate inner scale: ticks every 1000 rpm, numbers every 2000 rpm.
+constexpr int RPM_SCALE_R_OUT = 150;
+constexpr int RPM_SCALE_R_IN = 138;
+constexpr int RPM_SCALE_TICK_PX = 2;
+constexpr int RPM_SCALE_LABEL_R = 122;
 
 LGFX_Sprite canvas(&display_get());
 bool canvas_ok = false;
@@ -106,45 +110,38 @@ void draw_arc_bg() {
   draw_rpm_segment_gaps();
 }
 
-void draw_rpm_ticks() {
+void draw_rpm_scale() {
   auto& d = g();
-  // Segment borders are drawn every 250 rpm. The 500/1000 rpm ticks sit on
-  // top of those borders, so the scale reads: thick tick, 2 segments, thin
-  // tick, 2 segments, next thick tick.
-  for (int i = 0; i <= RPM_MAX / 500; i++) {
-    int rpm = i * 500;
-    float a = rpm_angle(rpm) * (float)M_PI / 180.0f;
-    bool thousand = (i % 2 == 0);
-    int width = thousand ? RPM_TICK_THICK_PX : RPM_TICK_THIN_PX;
-    int r1 = RPM_ARC_R_OUT + 2;
-    int r2 = thousand ? (RPM_ARC_R_IN - 12) : (RPM_ARC_R_IN - 5);
-    uint16_t c = thousand ? TFT_WHITE : 0x8410;
 
+  // Thin reference arc inside the segmented indicator arc.
+  d.fillArc(SCREEN_CENTER_X, SCREEN_CENTER_Y, RPM_SCALE_R_OUT, RPM_SCALE_R_OUT - 1,
+            RPM_ARC_START, RPM_ARC_START + RPM_ARC_SWEEP, 0x4208);
+
+  // One thin tick per 1000 rpm, fully separated from the outer arc.
+  for (int rpm = 0; rpm <= RPM_MAX; rpm += 1000) {
+    float a = rpm_angle(rpm) * (float)M_PI / 180.0f;
     float ca = cosf(a), sa = sinf(a);
     float nx = -sa, ny = ca;
-    int x1 = SCREEN_CENTER_X + (int)(ca * r1);
-    int y1 = SCREEN_CENTER_Y + (int)(sa * r1);
-    int x2 = SCREEN_CENTER_X + (int)(ca * r2);
-    int y2 = SCREEN_CENTER_Y + (int)(sa * r2);
+    int x1 = SCREEN_CENTER_X + (int)(ca * RPM_SCALE_R_OUT);
+    int y1 = SCREEN_CENTER_Y + (int)(sa * RPM_SCALE_R_OUT);
+    int x2 = SCREEN_CENTER_X + (int)(ca * RPM_SCALE_R_IN);
+    int y2 = SCREEN_CENTER_Y + (int)(sa * RPM_SCALE_R_IN);
 
-    int half = width / 2;
-    for (int off = -half; off < width - half; off++) {
+    int half = RPM_SCALE_TICK_PX / 2;
+    for (int off = -half; off < RPM_SCALE_TICK_PX - half; off++) {
       int ox = (int)(nx * off);
       int oy = (int)(ny * off);
-      d.drawLine(x1 + ox, y1 + oy, x2 + ox, y2 + oy, c);
+      d.drawLine(x1 + ox, y1 + oy, x2 + ox, y2 + oy, 0x8410);
     }
   }
-}
 
-void draw_rpm_labels() {
-  auto& d = g();
+  // Numbers every 2000 rpm.
   d.setTextDatum(middle_center);
   d.setTextColor(TFT_WHITE, TFT_BLACK);
   for (int k = 0; k <= RPM_MAX / 1000; k += 2) {
     float a = rpm_angle(k * 1000) * (float)M_PI / 180.0f;
-    int r = RPM_ARC_R_IN - 24;
-    int x = SCREEN_CENTER_X + (int)(cosf(a) * r);
-    int y = SCREEN_CENTER_Y + (int)(sinf(a) * r);
+    int x = SCREEN_CENTER_X + (int)(cosf(a) * RPM_SCALE_LABEL_R);
+    int y = SCREEN_CENTER_Y + (int)(sinf(a) * RPM_SCALE_LABEL_R);
     char buf[4];
     snprintf(buf, sizeof(buf), "%d", k);
     d.drawString(buf, x, y, 4);
@@ -173,7 +170,6 @@ void draw_rpm(int rpm) {
     // Cut the same dark gaps in the filled arc so lit and unlit segments align.
     draw_rpm_segment_gaps();
   }
-  draw_rpm_ticks();
 }
 
 void draw_seg_digit(lgfx::LGFX_Device& d, int x, int y, int w, int h, int t, int digit, uint16_t on, uint16_t off) {
@@ -296,8 +292,7 @@ void draw_static() {
   d.fillScreen(TFT_BLACK);
   d.drawCircle(SCREEN_CENTER_X, SCREEN_CENTER_Y, 179, 0x1082);
   draw_arc_bg();
-  draw_rpm_ticks();
-  draw_rpm_labels();
+  draw_rpm_scale();
   static_drawn = true;
   dirty = true;
 }
