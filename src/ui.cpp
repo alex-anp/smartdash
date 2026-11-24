@@ -22,6 +22,29 @@ bool dirty = true;
 bool static_drawn = false;
 uint32_t last_demo_ms = 0;
 
+enum class Screen { Dash, ElmConnect };
+Screen screen = Screen::Dash;
+
+constexpr uint32_t DOT_PERIOD_MS = 260;
+uint32_t last_dot_ms = 0;
+int dot_phase = 0;
+int drawn_dot_phase = -1;
+
+uint32_t last_elm_draw = 0;
+bool elm_screen_dirty = true;
+String connectTarget;
+
+struct TouchInput {
+  bool pressed = false;
+  int32_t x = 0;
+  int32_t y = 0;
+  int32_t startX = 0;
+  int32_t startY = 0;
+  uint32_t startedAt = 0;
+  uint32_t lastClick = 0;
+};
+TouchInput touch;
+
 float rpm_angle(int rpm) {
   rpm = constrain(rpm, 0, RPM_MAX);
   return RPM_ARC_START + RPM_ARC_SWEEP * ((float)rpm / (float)RPM_MAX);
@@ -38,6 +61,17 @@ lgfx::LGFX_Device& g() { return canvas_ok ? (lgfx::LGFX_Device&)canvas : display
 
 void flush() {
   if (canvas_ok) canvas.pushSprite(0, 0);
+}
+
+void draw_status_dots(lgfx::LGFX_Device& d, int cx, int y, uint16_t active, uint16_t inactive, int phase) {
+  for (int i = 0; i < 3; i++) {
+    bool lit = (i == phase);
+    d.fillCircle(cx + (i - 1) * 14, y, lit ? 4 : 3, lit ? active : inactive);
+  }
+}
+
+bool in_rect(int32_t x, int32_t y, int x0, int y0, int x1, int y1) {
+  return x >= x0 && x <= x1 && y >= y0 && y <= y1;
 }
 
 void draw_arc_bg() {
@@ -208,9 +242,19 @@ void draw_bottom(int coolant_c, float volt, bool connected) {
   else snprintf(vbuf, sizeof(vbuf), "%.1fV", volt);
   d.drawString(vbuf, 238, 298, 4);
 
-  d.setTextDatum(middle_center);
-  d.setTextColor(connected ? TFT_GREEN : TFT_ORANGE, TFT_BLACK);
-  d.drawString(connected ? "ELM: OK" : "ELM: ...", SCREEN_CENTER_X, 324, 2);
+  // ELM status indicator. Three dots light up in turn while connecting.
+  // A single tap on this area opens the ELM connection screen.
+  d.drawRoundRect(122, 309, 116, 30, 6, connected ? 0x0440 : 0x4208);
+  if (connected) {
+    d.setTextDatum(middle_center);
+    d.setTextColor(TFT_GREEN, TFT_BLACK);
+    d.drawString("ELM OK", SCREEN_CENTER_X, 324, 2);
+  } else {
+    d.setTextDatum(middle_right);
+    d.setTextColor(TFT_ORANGE, TFT_BLACK);
+    d.drawString("ELM", SCREEN_CENTER_X - 12, 324, 2);
+    draw_status_dots(d, SCREEN_CENTER_X + 18, 324, TFT_ORANGE, 0x4208, dot_phase);
+  }
 }
 
 void draw_static() {
@@ -224,9 +268,158 @@ void draw_static() {
   dirty = true;
 }
 
+String elm_status_text(ElmStatus s) {
+  switch (s) {
+    case ElmStatus::Idle:         return "Idle";
+    case ElmStatus::Scanning:     return "Scanning ELM devices";
+    case ElmStatus::Connecting:   return connectTarget.length() ? ("Connecting " + connectTarget) : String("Connecting...");
+    case ElmStatus::Initializing: return "Initializing ELM...";
+    case ElmStatus::Connected:    return connectTarget.length() ? ("Connected: " + connectTarget) : String("Connected to ELM");
+  }
+  return "";
+}
+
+void draw_elm_screen() {
+  auto& d = g();
+  ElmStatus st = elm_status();
+
+  d.fillScreen(TFT_BLACK);
+  d.setTextDatum(middle_center);
+  d.setTextColor(TFT_WHITE, TFT_BLACK);
+  d.drawString("ELM Connect", SCREEN_CENTER_X, 28, 4);
+
+  d.drawRoundRect(12, 10, 72, 34, 6, 0x4208);
+  d.drawRoundRect(276, 10, 72, 34, 6, 0x4208);
+  d.setTextColor(0xC618, TFT_BLACK);
+  d.drawString("Back", 48, 27, 2);
+  d.drawString("Scan", 312, 27, 2);
+
+  d.drawFastHLine(16, 54, 328, 0x2104);
+
+  d.setTextDatum(middle_left);
+  uint16_t statusColor = (st == ElmStatus::Connected) ? TFT_GREEN :
+                         (st == ElmStatus::Idle) ? 0x8410 : TFT_ORANGE;
+  d.setTextColor(statusColor, TFT_BLACK);
+  d.drawString(elm_status_text(st), 24, 74, 2);
+  if (st == ElmStatus::Scanning || st == ElmStatus::Connecting || st == ElmStatus::Initializing) {
+    draw_status_dots(d, 322, 74, statusColor, 0x4208, dot_phase);
+  }
+
+  d.drawFastHLine(16, 94, 328, 0x2104);
+
+  ElmScanEntry entries[6];
+  size_t n = elm_get_found(entries, 6);
+  if (n == 0) {
+    d.setTextDatum(middle_center);
+    d.setTextColor(0x8410, TFT_BLACK);
+    d.drawString("No BLE devices yet", SCREEN_CENTER_X, 170, 2);
+    d.drawString("Keep the ELM nearby", SCREEN_CENTER_X, 196, 2);
+  } else {
+    for (size_t i = 0; i < n; i++) {
+      const ElmScanEntry& e = entries[i];
+      int y0 = 106 + (int)i * 38;
+      d.fillRoundRect(16, y0, 328, 34, 6, e.compatible ? 0x0420 : 0x1082);
+      d.setTextDatum(middle_left);
+      d.setTextColor(e.compatible ? TFT_GREEN : 0x8410, e.compatible ? 0x0420 : 0x1082);
+      d.drawString(e.compatible ? ">" : " ", 26, y0 + 17, 2);
+
+      char name[25];
+      snprintf(name, sizeof(name), "%s", e.name);
+      d.setTextColor(TFT_WHITE, e.compatible ? 0x0420 : 0x1082);
+      d.drawString(name, 44, y0 + 11, 2);
+      d.setTextColor(0x8410, e.compatible ? 0x0420 : 0x1082);
+      d.drawString(e.address, 44, y0 + 25, 2);
+
+      char rssi[12];
+      snprintf(rssi, sizeof(rssi), "%d dBm", e.rssi);
+      d.setTextDatum(middle_right);
+      d.setTextColor(e.rssi > -70 ? TFT_GREEN : TFT_ORANGE, e.compatible ? 0x0420 : 0x1082);
+      d.drawString(rssi, 332, y0 + 17, 2);
+    }
+  }
+
+  d.setTextDatum(middle_center);
+  d.setTextColor(0x8410, TFT_BLACK);
+  d.drawString(st == ElmStatus::Connected ? "Tap Back to return" : "Tap a device to connect", SCREEN_CENTER_X, 350, 2);
+
+  flush();
+}
+
+void handle_tap(int32_t x, int32_t y) {
+  if (screen == Screen::Dash) {
+    if (in_rect(x, y, 122, 309, 238, 339)) ui_show_elm_connect();
+    return;
+  }
+
+  if (in_rect(x, y, 12, 10, 84, 44)) {
+    ui_hide_elm_connect();
+    return;
+  }
+  if (in_rect(x, y, 276, 10, 348, 44)) {
+    connectTarget = "";
+    elm_start_scan();
+    elm_screen_dirty = true;
+    return;
+  }
+  if (y >= 106 && y <= 336) {
+    ElmScanEntry entries[6];
+    size_t n = elm_get_found(entries, 6);
+    int row = (y - 106) / 38;
+    if (row >= 0 && row < (int)n && y - (106 + row * 38) <= 34) {
+      connectTarget = entries[row].address;
+      elm_connect(connectTarget);
+      elm_screen_dirty = true;
+    }
+  }
+}
+
+void poll_touch() {
+  int32_t x = 0, y = 0;
+  uint_fast8_t count = display_get().getTouch(&x, &y);
+
+  if (count > 0) {
+    if (!touch.pressed) {
+      touch.pressed = true;
+      touch.startX = x;
+      touch.startY = y;
+      touch.startedAt = millis();
+    }
+    touch.x = x;
+    touch.y = y;
+    return;
+  }
+
+  if (!touch.pressed) return;
+  touch.pressed = false;
+
+  uint32_t now = millis();
+  int32_t dx = touch.x - touch.startX;
+  int32_t dy = touch.y - touch.startY;
+  if (dx < 0) dx = -dx;
+  if (dy < 0) dy = -dy;
+  if (now - touch.startedAt < 800 && dx < 24 && dy < 24 && now - touch.lastClick > 250) {
+    touch.lastClick = now;
+    Serial.printf("[UI] tap %d,%d\n", (int)touch.x, (int)touch.y);
+    handle_tap(touch.x, touch.y);
+  }
+}
+
+void poll_button() {
+  static bool last = true;
+  bool level = digitalRead(BTN_PIN) == LOW;
+  if (level && !last && millis() - touch.lastClick > 250) {
+    touch.lastClick = millis();
+    Serial.println("[UI] button press");
+    if (screen == Screen::Dash) ui_show_elm_connect();
+    else ui_hide_elm_connect();
+  }
+  last = level;
+}
+
 }  // namespace
 
 void ui_init() {
+  pinMode(BTN_PIN, INPUT_PULLUP);
   if (!canvas_ok) {
     canvas.setPsram(true);
     canvas.setColorDepth(16);
@@ -269,6 +462,25 @@ void ui_show_search() {
   flush();
 }
 
+void ui_show_elm_connect() {
+  if (screen == Screen::ElmConnect) return;
+  screen = Screen::ElmConnect;
+  connectTarget = "";
+  elm_screen_dirty = true;
+  last_elm_draw = 0;
+  // Refresh the device list unless we already have a live ELM connection.
+  if (!elm_is_connected()) elm_start_scan();
+  draw_elm_screen();
+}
+
+void ui_hide_elm_connect() {
+  if (screen == Screen::Dash) return;
+  screen = Screen::Dash;
+  static_drawn = false;  // ELM screen overwrote the sprite
+  dirty = true;
+  ui_show_dash();
+}
+
 void ui_show_dash() {
   if (!static_drawn) draw_static();
 
@@ -281,11 +493,14 @@ void ui_show_dash() {
     draw_speed(cur.speed_kmh);
     drawn.speed_kmh = cur.speed_kmh;
   }
-  if (drawn.coolant_c != cur.coolant_c || fabsf(drawn.volt - cur.volt) > 0.05f || drawn.connected != cur.connected) {
+  int phase = cur.connected ? -1 : dot_phase;
+  if (drawn.coolant_c != cur.coolant_c || fabsf(drawn.volt - cur.volt) > 0.05f ||
+      drawn.connected != cur.connected || drawn_dot_phase != phase) {
     draw_bottom(cur.coolant_c, cur.volt, cur.connected);
     drawn.coolant_c = cur.coolant_c;
     drawn.volt = cur.volt;
     drawn.connected = cur.connected;
+    drawn_dot_phase = phase;
   }
   dirty = false;
   flush();
@@ -293,7 +508,12 @@ void ui_show_dash() {
 
 void ui_loop() {
   uint32_t now = millis();
-  if (!elm_is_connected()) {
+  bool connected = elm_is_connected();
+
+  poll_touch();
+  poll_button();
+
+  if (!connected) {
     if (now - last_demo_ms > 120) {
       last_demo_ms = now;
       static uint32_t t = 0;
@@ -309,5 +529,20 @@ void ui_loop() {
     }
   }
 
-  ui_show_dash();
+  if ((!connected || screen == Screen::ElmConnect) && now - last_dot_ms >= DOT_PERIOD_MS) {
+    last_dot_ms = now;
+    dot_phase = (dot_phase + 1) % 3;
+    dirty = true;
+    elm_screen_dirty = true;
+  }
+
+  if (screen == Screen::ElmConnect) {
+    if (elm_screen_dirty || now - last_elm_draw >= 400) {
+      last_elm_draw = now;
+      elm_screen_dirty = false;
+      draw_elm_screen();
+    }
+  } else {
+    ui_show_dash();
+  }
 }

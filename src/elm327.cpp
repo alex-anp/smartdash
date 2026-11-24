@@ -1,6 +1,7 @@
 #include "elm327.h"
 
 #include <NimBLEDevice.h>
+#include <string.h>
 #include <vector>
 
 #include "config.h"
@@ -13,6 +14,7 @@ constexpr uint32_t SCAN_TIME_MS = 4000;
 constexpr uint32_t CMD_TIMEOUT_MS = 1200;
 constexpr uint32_t POLL_GAP_MS = 120;
 constexpr uint32_t RECONNECT_GAP_MS = 3000;
+constexpr size_t MAX_FOUND = 8;
 
 NimBLEAdvertisedDevice* advDevice = nullptr;
 NimBLEClient* client = nullptr;
@@ -24,6 +26,52 @@ bool connecting = false;
 bool connected = false;
 bool needScanRestart = false;
 uint32_t lastScanRestart = 0;
+ElmStatus status = ElmStatus::Idle;
+
+ElmScanEntry found[MAX_FOUND];
+size_t foundCount = 0;
+portMUX_TYPE foundMux = portMUX_INITIALIZER_UNLOCKED;
+
+void setStatus(ElmStatus s) { status = s; }
+
+void clearFound() {
+  portENTER_CRITICAL(&foundMux);
+  foundCount = 0;
+  portEXIT_CRITICAL(&foundMux);
+}
+
+void recordFound(const NimBLEAdvertisedDevice* d, bool compatible) {
+  const String addr = String(d->getAddress().toString().c_str());
+  if (!addr.length()) return;
+  std::string name = d->haveName() ? d->getName() : "";
+  if (name.empty()) name = "<unknown>";
+
+  portENTER_CRITICAL(&foundMux);
+  int idx = -1;
+  for (size_t i = 0; i < foundCount; i++) {
+    if (strcmp(found[i].address, addr.c_str()) == 0) {
+      idx = (int)i;
+      break;
+    }
+  }
+  if (idx < 0) {
+    if (foundCount < MAX_FOUND) {
+      idx = (int)foundCount++;
+    } else {
+      // Keep the strongest signals when the list is full.
+      int weakest = 0;
+      for (size_t i = 1; i < foundCount; i++) {
+        if (found[i].rssi < found[weakest].rssi) weakest = (int)i;
+      }
+      idx = weakest;
+    }
+  }
+  snprintf(found[idx].address, sizeof(found[idx].address), "%s", addr.c_str());
+  snprintf(found[idx].name, sizeof(found[idx].name), "%s", name.c_str());
+  found[idx].rssi = d->getRSSI();
+  found[idx].compatible = compatible;
+  portEXIT_CRITICAL(&foundMux);
+}
 
 String targetAddr;
 String rxBuf;
@@ -51,23 +99,28 @@ bool isElmName(const std::string& name) {
          n.indexOf("VEEPEAK") >= 0 || n.indexOf("OBDLINK") >= 0 || n.indexOf("VGATE") >= 0;
 }
 
+bool looksLikeElm(const NimBLEAdvertisedDevice* d) {
+  if (d->haveName() && isElmName(d->getName())) return true;
+  if (d->haveServiceUUID()) {
+    for (int i = 0; i < d->getServiceUUIDCount(); i++) {
+      String us = d->getServiceUUID(i).toString().c_str();
+      us.toUpperCase();
+      if (us.indexOf("FFF0") >= 0 || us.indexOf("FFE0") >= 0 || us.indexOf("6E400001") >= 0) return true;
+    }
+  }
+  return false;
+}
+
 class ScanCB : public NimBLEScanCallbacks {
   void onResult(const NimBLEAdvertisedDevice* d) override {
     String addr = d->getAddress().toString().c_str();
     std::string name = d->haveName() ? d->getName() : "";
+    bool compatible = looksLikeElm(d);
+    recordFound(d, compatible);
+
     bool match = false;
     if (targetAddr.length() > 0 && addr.equalsIgnoreCase(targetAddr)) match = true;
-    if (!match && targetAddr.length() == 0 && isElmName(name)) match = true;
-    if (!match && d->haveServiceUUID()) {
-      for (int i = 0; i < d->getServiceUUIDCount(); i++) {
-        String us = d->getServiceUUID(i).toString().c_str();
-        us.toUpperCase();
-        if (us.indexOf("FFF0") >= 0 || us.indexOf("FFE0") >= 0 || us.indexOf("6E400001") >= 0) {
-          match = true;
-          break;
-        }
-      }
-    }
+    if (!match && targetAddr.length() == 0 && compatible) match = true;
     if (match) {
       Serial.printf("[ELM] match %s %s\n", addr.c_str(), name.c_str());
       NimBLEDevice::getScan()->stop();
@@ -90,6 +143,7 @@ class ClientCB : public NimBLEClientCallbacks {
     chrNotify = nullptr;
     connected = false;
     connecting = false;
+    setStatus(ElmStatus::Idle);
     cmdState = CMD_IDLE;
     dash.connected = false;
     pushData(dash);
@@ -206,6 +260,7 @@ void startInit() {
   initState = INIT_SEND;
   initIdx = 0;
   cmdState = CMD_IDLE;
+  setStatus(ElmStatus::Initializing);
 }
 
 void handleInit() {
@@ -224,6 +279,7 @@ void handleInit() {
     if (initIdx >= INIT_N) {
       initState = INIT_DONE;
       connected = true;
+      setStatus(ElmStatus::Connected);
       dash.connected = true;
       pushData(dash);
       Serial.println("[ELM] init done");
@@ -236,6 +292,7 @@ void handleInit() {
 bool connectToAdv() {
   if (!advDevice) return false;
   connecting = true;
+  setStatus(ElmStatus::Connecting);
   initState = INIT_IDLE;
   cmdState = CMD_IDLE;
 
@@ -245,6 +302,7 @@ bool connectToAdv() {
   if (!client) {
     if (NimBLEDevice::getCreatedClientCount() >= NIMBLE_MAX_CONNECTIONS) {
       connecting = false;
+      setStatus(ElmStatus::Idle);
       return false;
     }
     client = NimBLEDevice::createClient();
@@ -259,6 +317,7 @@ bool connectToAdv() {
       NimBLEDevice::deleteClient(client);
       client = nullptr;
       connecting = false;
+      setStatus(ElmStatus::Idle);
       needScanRestart = true;
       return false;
     }
@@ -268,6 +327,7 @@ bool connectToAdv() {
     Serial.println("[ELM] no usable chars");
     client->disconnect();
     connecting = false;
+    setStatus(ElmStatus::Idle);
     needScanRestart = true;
     return false;
   }
@@ -330,6 +390,8 @@ void handlePoll() {
 void elm_init() {
   NimBLEDevice::init("SmartDash");
   NimBLEDevice::setPower(9);
+  setStatus(ElmStatus::Idle);
+  clearFound();
   NimBLEScan* scan = NimBLEDevice::getScan();
   scan->setScanCallbacks(new ScanCB(), false);
   scan->setActiveScan(true);
@@ -338,6 +400,7 @@ void elm_init() {
 }
 
 void elm_start_scan() {
+  if (client && client->isConnected()) client->disconnect();
   targetAddr = "";
   doConnect = false;
   connected = false;
@@ -348,6 +411,8 @@ void elm_start_scan() {
   dash.connected = false;
   pushData(dash);
   needScanRestart = false;
+  clearFound();
+  setStatus(ElmStatus::Scanning);
   Serial.println("[ELM] scan start");
   NimBLEDevice::getScan()->start(SCAN_TIME_MS, false);
 }
@@ -362,6 +427,8 @@ void elm_connect_saved(const String& addr) {
   dash = {};
   pushData(dash);
   needScanRestart = false;
+  clearFound();
+  setStatus(ElmStatus::Scanning);
   Serial.printf("[ELM] scan for %s\n", addr.c_str());
   NimBLEDevice::getScan()->start(SCAN_TIME_MS, false);
 }
@@ -371,6 +438,8 @@ void elm_connect(const String& addr) {
   storage_save_last_elm(addr);
   doConnect = false;
   needScanRestart = false;
+  setStatus(ElmStatus::Scanning);
+  Serial.printf("[ELM] connect to %s\n", addr.c_str());
   NimBLEDevice::getScan()->start(SCAN_TIME_MS, false);
 }
 
@@ -384,6 +453,7 @@ void elm_loop() {
     handleInit();
     if (initState == INIT_FAIL) {
       if (client && client->isConnected()) client->disconnect();
+      setStatus(ElmStatus::Idle);
       needScanRestart = true;
     }
   }
@@ -395,6 +465,7 @@ void elm_loop() {
     if (now - lastScanRestart > RECONNECT_GAP_MS) {
       lastScanRestart = now;
       needScanRestart = false;
+      setStatus(ElmStatus::Scanning);
       Serial.println("[ELM] restart scan");
       NimBLEDevice::getScan()->start(SCAN_TIME_MS, false);
     }
@@ -402,3 +473,16 @@ void elm_loop() {
 }
 
 bool elm_is_connected() { return connected && initState == INIT_DONE; }
+
+ElmStatus elm_status() { return status; }
+
+size_t elm_get_found(ElmScanEntry* out, size_t max) {
+  if (!out || max == 0) return 0;
+  portENTER_CRITICAL(&foundMux);
+  size_t n = foundCount < max ? foundCount : max;
+  for (size_t i = 0; i < n; i++) {
+    memcpy(&out[i], &found[i], sizeof(ElmScanEntry));
+  }
+  portEXIT_CRITICAL(&foundMux);
+  return n;
+}

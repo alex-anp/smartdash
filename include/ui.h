@@ -16,6 +16,8 @@ void ui_set_data(const DashData& data);
 void ui_show_boot();
 void ui_show_search();
 void ui_show_dash();
+void ui_show_elm_connect();
+void ui_hide_elm_connect();
 void ui_loop();
 
 #endif

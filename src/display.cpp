@@ -7,6 +7,7 @@ class LGFX : public lgfx::LGFX_Device {
   lgfx::Panel_ST77916 _panel;
   lgfx::Bus_SPI _bus;
   lgfx::Light_PWM _light;
+  lgfx::Touch_CST816S _touch;
 
  public:
   LGFX() {
@@ -58,6 +59,24 @@ class LGFX : public lgfx::LGFX_Device {
       cfg.pwm_channel = 0;
       _light.config(cfg);
       _panel.setLight(&_light);
+    }
+
+    {
+      auto cfg = _touch.config();
+      cfg.i2c_port = 0;
+      cfg.i2c_addr = 0x15;  // CST816S default
+      cfg.pin_sda = TOUCH_PIN_NUM_I2C_SDA;
+      cfg.pin_scl = TOUCH_PIN_NUM_I2C_SCL;
+      cfg.pin_int = TOUCH_PIN_NUM_INT;
+      cfg.pin_rst = TOUCH_PIN_NUM_RST;
+      cfg.freq = 400000;
+      cfg.x_min = 0;
+      cfg.x_max = SCREEN_WIDTH - 1;
+      cfg.y_min = 0;
+      cfg.y_max = SCREEN_HEIGHT - 1;
+      cfg.offset_rotation = 0;
+      _touch.config(cfg);
+      _panel.setTouch(&_touch);
     }
 
     setPanel(&_panel);
