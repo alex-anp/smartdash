@@ -61,7 +61,11 @@ uint16_t rpm_color(int rpm) {
 lgfx::LGFX_Device& g() { return canvas_ok ? (lgfx::LGFX_Device&)canvas : display_get(); }
 
 void flush() {
-  if (canvas_ok) canvas.pushSprite(0, 0);
+  if (!canvas_ok) return;
+  uint32_t t = micros();
+  canvas.pushSprite(0, 0);
+  uint32_t dt = micros() - t;
+  if (dt > 20000) Serial.printf("[SLOW] pushSprite=%u us\n", (unsigned)dt);
 }
 
 void draw_status_dots(lgfx::LGFX_Device& d, int cx, int y, uint16_t active, uint16_t inactive, int phase) {
@@ -372,8 +376,11 @@ void handle_tap(int32_t x, int32_t y) {
 }
 
 void poll_touch() {
+  uint32_t t = micros();
   int32_t x = 0, y = 0;
   uint_fast8_t count = display_get().getTouch(&x, &y);
+  uint32_t dt = micros() - t;
+  if (dt > 5000) Serial.printf("[SLOW] getTouch=%u us\n", (unsigned)dt);
 
   if (count > 0) {
     if (!touch.pressed) {
@@ -564,7 +571,10 @@ void ui_loop() {
     if (elm_screen_dirty || now - last_elm_draw >= 600) {
       last_elm_draw = now;
       elm_screen_dirty = false;
+      uint32_t t = micros();
       draw_elm_screen();
+      uint32_t dt = micros() - t;
+      if (dt > 30000) Serial.printf("[SLOW] drawElm=%u us\n", (unsigned)dt);
     }
   } else {
     ui_show_dash();

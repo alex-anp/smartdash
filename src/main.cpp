@@ -37,8 +37,18 @@ void setup() {
 }
 
 void loop() {
+  uint32_t t0 = micros();
   elm_loop();
+  uint32_t t1 = micros();
   ui_loop();
+  uint32_t t2 = micros();
   web_loop();
+  uint32_t t3 = micros();
+
+  // Log any loop section that blocks for a noticeable time.
+  if (t1 - t0 > 30000 || t2 - t1 > 30000 || t3 - t2 > 30000) {
+    Serial.printf("[SLOW] elm=%u ui=%u web=%u us\n", (unsigned)(t1 - t0),
+                  (unsigned)(t2 - t1), (unsigned)(t3 - t2));
+  }
   delay(2);
 }
