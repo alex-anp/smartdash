@@ -243,7 +243,7 @@ bool connectToAdv() {
   client = NimBLEDevice::getClientByPeerAddress(addr);
   if (!client) client = NimBLEDevice::getDisconnectedClient();
   if (!client) {
-    if (NimBLEDevice::getClientListSize() >= NIMBLE_MAX_CONNECTIONS) {
+    if (NimBLEDevice::getCreatedClientCount() >= NIMBLE_MAX_CONNECTIONS) {
       connecting = false;
       return false;
     }
