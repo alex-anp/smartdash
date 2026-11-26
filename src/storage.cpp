@@ -22,6 +22,8 @@ static bool fsReady = false;
 
 static const char* NS = "smartdash";
 static const char* KEY_LAST_ELM = "last_elm";
+static const char* KEY_DRAG_LAST = "drag_last";
+static const char* KEY_DRAG_BEST = "drag_best";
 static const char* KEY_LOG_BOOT = "log_boot";
 
 static const char* LOG_PATH = "/elm.log";
@@ -52,6 +54,11 @@ void storage_save_last_elm(const String &addr) {
 void storage_clear_last_elm() {
   prefs.remove(KEY_LAST_ELM);
 }
+
+String storage_get_drag_last() { return prefs.getString(KEY_DRAG_LAST, ""); }
+void storage_save_drag_last(const String& line) { prefs.putString(KEY_DRAG_LAST, line); }
+String storage_get_drag_best() { return prefs.getString(KEY_DRAG_BEST, ""); }
+void storage_save_drag_best(const String& line) { prefs.putString(KEY_DRAG_BEST, line); }
 
 // Одна строка журнала. Переносы строк из ответов ELM заменяются на '|'.
 void storage_log(const char* fmt, ...) {

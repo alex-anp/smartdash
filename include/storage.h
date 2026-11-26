@@ -12,6 +12,13 @@ String storage_get_last_elm();
 void storage_save_last_elm(const String &addr);
 void storage_clear_last_elm();
 
+// Последний и лучший замер разгона. Формат строки задаёт dragrace.cpp:
+// "target,total_cs,cs0|cs1|...", пустая строка = замеров ещё не было.
+String storage_get_drag_last();
+void storage_save_drag_last(const String& line);
+String storage_get_drag_best();
+void storage_save_drag_best(const String& line);
+
 // Одна строка: "b<boot> t<секунды>.<мс> <сообщение>".
 void storage_log(const char* fmt, ...);
 

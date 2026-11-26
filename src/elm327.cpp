@@ -57,6 +57,7 @@ uint32_t lastScanRestart = 0;
 uint32_t connectStartedAt = 0;
 String pendingAddr;                 // Адрес, к которому подключаемся; при успехе сохраняется в NVS
 volatile ElmStatus status = ElmStatus::Idle;
+volatile bool raceMode = false;  // экран замера: опрашиваем только обороты и скорость
 
 // Общий снимок, который читает draw_elm_screen() на ядре UI.
 ElmScanEntry found[MAX_FOUND];
@@ -154,7 +155,13 @@ uint32_t cmdSentAt = 0;
 uint32_t cmdTimeout = CMD_TIMEOUT_MS;
 uint8_t cmdPidStep = 0;
 
-void pushData(const DashData& d) { ui_set_data(d); }
+// Таймштамп ставим здесь, в BLE-задаче, в момент разбора ответа — UI получит
+// его вместе со значениями и сможет интерполировать отметки замера.
+void pushData(const DashData& d) {
+  DashData snap = d;
+  snap.t_ms = millis();
+  ui_set_data(snap);
+}
 
 // Ответы ELM — куски обычного ASCII с завершающим приглашением '>'. Добавляем их
 // в rxBuf, а конечный автомат команд решает, когда ответ считается полным.
@@ -245,10 +252,52 @@ class ClientCB : public NimBLEClientCallbacks {
 
 ClientCB clientCB;
 
+// Короткий UUID без префикса 0x — удобно сравнивать и писать в журнал.
+String charUuid(NimBLERemoteCharacteristic* ch) {
+  String u = ch->getUUID().toString().c_str();
+  u.toUpperCase();
+  u.replace("0X", "");
+  return u;
+}
+
+bool canWriteChar(NimBLERemoteCharacteristic* ch) {
+  return ch && (ch->canWrite() || ch->canWriteNoResponse());
+}
+
+bool canNotifyChar(NimBLERemoteCharacteristic* ch) {
+  return ch && (ch->canNotify() || ch->canIndicate());
+}
+
+bool useChars(NimBLERemoteCharacteristic* w, NimBLERemoteCharacteristic* n) {
+  if (!canWriteChar(w) || !canNotifyChar(n)) return false;
+  chrWrite = w;
+  chrNotify = n;
+  return true;
+}
+
+// Чем больше баллов, тем вероятнее, что это UART-характеристика ELM.
+// Стандартные GAP/Device Info (2Axx) не подходят: в логе уже было
+// write=0x2a00 (Device Name), из-за чего AT-команды не доходили до адаптера.
+int uartScore(const String& u, bool write) {
+  if (u.startsWith("2A")) return -1000;
+  if (write) {
+    if (u.indexOf("FFF1") >= 0 || u.indexOf("FFE1") >= 0) return 100;
+    if (u.indexOf("6E400002") >= 0) return 90;
+    if (u.indexOf("FFF2") >= 0 || u.indexOf("FFE2") >= 0) return 80;
+  } else {
+    if (u.indexOf("FFF2") >= 0 || u.indexOf("FFE1") >= 0) return 100;
+    if (u.indexOf("6E400003") >= 0) return 90;
+    if (u.indexOf("FFF1") >= 0 || u.indexOf("FFE2") >= 0) return 80;
+  }
+  if (u.startsWith("FFF") || u.startsWith("FFE")) return 40;
+  return 0;
+}
+
 // Ищем характеристики с записью и уведомлениями. Приоритетные профили:
-//   1) FFF0 / FFF1 / FFF2  — частые клоны ELM327 с BLE
-//   2) Nordic UART Service — ещё одна распространённая прошивка адаптеров
-//   3) любая подходящая пара — крайняя мера для неизвестных модулей
+//   1) FFF0 / FFF1 / FFF2 и FFE0 / FFE1 — частые клоны ELM327 с BLE;
+//      у части адаптеров FFF1 работает и на запись, и на уведомления.
+//   2) Nordic UART Service — ещё одна распространённая прошивка адаптеров.
+//   3) любая подходящая пара — крайняя мера для неизвестных модулей.
 bool pickChars(NimBLEClient* c) {
   chrWrite = nullptr;
   chrNotify = nullptr;
@@ -256,43 +305,94 @@ bool pickChars(NimBLEClient* c) {
   NimBLERemoteService* s = c->getService("FFF0");
   if (!s) s = c->getService("fff0");
   if (s) {
-    NimBLERemoteCharacteristic* w = s->getCharacteristic("FFF1");
-    if (!w) w = s->getCharacteristic("fff1");
-    NimBLERemoteCharacteristic* n = s->getCharacteristic("FFF2");
-    if (!n) n = s->getCharacteristic("fff2");
-    if (w && (w->canWrite() || w->canWriteNoResponse())) chrWrite = w;
-    if (n && (n->canNotify() || n->canIndicate())) chrNotify = n;
+    NimBLERemoteCharacteristic* f1 = s->getCharacteristic("FFF1");
+    if (!f1) f1 = s->getCharacteristic("fff1");
+    NimBLERemoteCharacteristic* f2 = s->getCharacteristic("FFF2");
+    if (!f2) f2 = s->getCharacteristic("fff2");
+
+    // Обычный вариант: FFF1 = запись, FFF2 = уведомления.
+    if (!useChars(f1, f2)) {
+      // У части клонов направление обратное: FFF2 = запись, FFF1 = уведомления.
+      if (!useChars(f2, f1)) {
+        // Одна характеристика на оба направления.
+        if (!useChars(f1, f1)) useChars(f2, f2);
+      }
+    }
   }
+
+  if (!chrWrite || !chrNotify) {
+    NimBLERemoteService* ffe = c->getService("FFE0");
+    if (!ffe) ffe = c->getService("ffe0");
+    if (ffe) {
+      NimBLERemoteCharacteristic* e1 = ffe->getCharacteristic("FFE1");
+      if (!e1) e1 = ffe->getCharacteristic("ffe1");
+      NimBLERemoteCharacteristic* e2 = ffe->getCharacteristic("FFE2");
+      if (!e2) e2 = ffe->getCharacteristic("ffe2");
+      if (!useChars(e1, e1) && !useChars(e2, e2)) {
+        if (!useChars(e1, e2)) useChars(e2, e1);
+      }
+    }
+  }
+
   if (!chrWrite || !chrNotify) {
     // Nordic UART: в RX-характеристику пишем, TX-характеристика уведомляет.
     NimBLERemoteService* nus = c->getService("6E400001-B5A3-F393-E0A9-E50E24DCCA9E");
     if (nus) {
       NimBLERemoteCharacteristic* w = nus->getCharacteristic("6E400002-B5A3-F393-E0A9-E50E24DCCA9E");
       NimBLERemoteCharacteristic* n = nus->getCharacteristic("6E400003-B5A3-F393-E0A9-E50E24DCCA9E");
-      if (w) chrWrite = w;
-      if (n) chrNotify = n;
+      useChars(w, n);
+    }
+  }
+
+  struct Cand {
+    NimBLERemoteCharacteristic* ch;
+    String uuid;
+    String svc;
+    bool write;
+    bool notify;
+  };
+  std::vector<Cand> cands;
+  // Полная таблица GATT пишется в журнал всегда — пригодится для диагностики.
+  for (auto* svc : c->getServices(true)) {
+    String su = svc->getUUID().toString().c_str();
+    su.toUpperCase();
+    su.replace("0X", "");
+    for (auto* ch : svc->getCharacteristics(true)) {
+      const String u = charUuid(ch);
+      const bool w = canWriteChar(ch);
+      const bool n = canNotifyChar(ch);
+      storage_log("GATT %s/%s w=%d n=%d", su.c_str(), u.c_str(), w ? 1 : 0, n ? 1 : 0);
+      if (w || n) cands.push_back({ch, u, su, w, n});
     }
   }
   if (!chrWrite || !chrNotify) {
-    // Крайняя мера: ищем по возможностям среди всех найденных сервисов/характеристик.
-    for (auto* svc : c->getServices(true)) {
-      for (auto* ch : svc->getCharacteristics(true)) {
-        if (!chrNotify && (ch->canNotify() || ch->canIndicate())) chrNotify = ch;
-        if (!chrWrite && (ch->canWrite() || ch->canWriteNoResponse())) chrWrite = ch;
+    // Крайняя мера: выбираем лучшую пару среди всех подходящих характеристик.
+    int best = -1;
+    for (const auto& a : cands) {
+      if (!a.write) continue;
+      for (const auto& b : cands) {
+        if (!b.notify) continue;
+        int sc = uartScore(a.uuid, true) + uartScore(b.uuid, false);
+        if (a.svc == b.svc) sc += 20;
+        if (a.ch == b.ch) sc += 5;
+        if (sc > best) {
+          best = sc;
+          chrWrite = a.ch;
+          chrNotify = b.ch;
+        }
       }
     }
   }
 
-  if (chrNotify && (chrNotify->canNotify() || chrNotify->canIndicate())) {
-    chrNotify->subscribe(chrNotify->canNotify(), notifyCB);
-  }
+  bool subscribed = false;
+  if (chrNotify) subscribed = chrNotify->subscribe(chrNotify->canNotify(), notifyCB);
   SD_LOG("[ELM] write=%s notify=%s\n", chrWrite ? chrWrite->getUUID().toString().c_str() : "-",
-                chrNotify ? chrNotify->getUUID().toString().c_str() : "-");
-  storage_log("CHARS write=%s notify=%s", chrWrite ? chrWrite->getUUID().toString().c_str() : "-",
-              chrNotify ? chrNotify->getUUID().toString().c_str() : "-");
+                 chrNotify ? chrNotify->getUUID().toString().c_str() : "-");
+  storage_log("CHARS write=%s notify=%s sub=%d", chrWrite ? charUuid(chrWrite).c_str() : "-",
+              chrNotify ? charUuid(chrNotify).c_str() : "-", subscribed ? 1 : 0);
   // Без канала уведомлений адаптер не вернёт ни одного ответа на AT-команду,
   // поэтому такой «половинчатый» профиль не считаем пригодным.
-  return chrWrite != nullptr && chrNotify != nullptr;
+  return chrWrite != nullptr && chrNotify != nullptr && subscribed;
 }
 
 // Неблокирующий запрос AT/OBD: очищаем RX-буфер, пишем "CMD\r", запускаем таймаут.
@@ -567,6 +667,32 @@ void handlePoll() {
   if (!connected || initState != INIT_DONE) return;
   static const char* cmds[] = {"010C", "010D", "0105", "ATRV"};
   uint32_t now = millis();
+
+  // Режим замера. Один запрос с двумя PID даёт ~8 сэмплов/с вместо ~2:
+  // 0105 и ATRV на это время перестают опрашиваться.
+  if (raceMode) {
+    if (cmdState == CMD_WAIT) {
+      String resp;
+      if (!readCmdResult(resp)) return;
+      std::vector<int> bytes;
+      // В ответе 410C...410D... оба pattern'а находятся независимо; лишние
+      // байты после нужных не мешают — берём только первые.
+      if (parsePid(resp, 0x01, 0x0C, bytes) && bytes.size() >= 2) {
+        dash.rpm = ((bytes[0] * 256) + bytes[1]) / 4;
+      }
+      if (parsePid(resp, 0x01, 0x0D, bytes) && bytes.size() >= 1) {
+        dash.speed_kmh = bytes[0];
+      }
+      dash.connected = true;
+      pushData(dash);
+      lastPoll = now;
+      return;
+    }
+    if (now - lastPoll < POLL_GAP_MS) return;
+    if (!sendCmdAsync("010C0D", 900)) lastPoll = now;
+    return;
+  }
+
   if (cmdState == CMD_WAIT) {
     String resp;
     if (!readCmdResult(resp)) return;
@@ -764,6 +890,20 @@ void elmTask(void*) {
 
 // «Подключено» означает и поднятое GATT-соединение, и завершённую AT-инициализацию; тогда начинается опрос OBD.
 bool elm_is_connected() { return connected && initState == INIT_DONE; }
+
+// Переход в режим замера и обратно. Сбрасываем автомат команд, чтобы ответ
+// предыдущего запроса не был разобран уже как ответ 010C0D (и наоборот).
+void elm_set_race_mode(bool enabled) {
+  if (enabled == raceMode) return;
+  raceMode = enabled;
+  portENTER_CRITICAL(&rxMux);
+  rxBuf = "";
+  portEXIT_CRITICAL(&rxMux);
+  cmdState = CMD_IDLE;
+  cmdPidStep = 0;
+  lastPoll = 0;
+  storage_log("RACE %s", enabled ? "on" : "off");
+}
 
 ElmStatus elm_status() { return status; }
 

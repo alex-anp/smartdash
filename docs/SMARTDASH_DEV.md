@@ -28,11 +28,14 @@
 - [x] BLE scan/connect + AT init implemented in `src/elm327.cpp`
 - [x] OBD polling: `010C`, `010D`, `0105`, `ATRV`
 - [x] One-shot startup sweep, no endless demo
-- [x] Swipe up/down and BOOT button navigation
-- [x] NVS storage for last connected ELM MAC
+- [x] Swipe up/down and BOOT button cycle Dash -> ELM Connect -> Drag
+- [x] NVS storage for last connected ELM MAC and drag results
+- [x] Persistent ELM connection log in LittleFS (`log`, `log all`, `clear` over USB)
+- [x] Drag screen: idle wait, launch detection, 10 km/h splits, demo ramp, last/best result
 - [x] Wi-Fi AP started; HTTP root is still a placeholder
 - [ ] Full web config forms (RPM limits, units, colors)
 - [ ] Test with a real ELM327 on the motorcycle
+- [ ] Verify `010C0D` multi-PID support on the real adapter (fallback: alternate `010C`/`010D`)
 
 ## PlatformIO
 
@@ -58,6 +61,10 @@
 - Speed: 0..99 seven-segment digits; 0..9 uses one centered digit
 - Bottom: coolant color thresholds <60 / 60..90 / >90, voltage <11 / 11..12 / 12..15 / >15
 - ELM status: three blinking dots while searching, `ELM OK` when connected
+- Drag screen: `DRAG 0-100`, live `ss.cc` timer, 10 rows (`km/h | time | split`);
+  tap the header to switch the target between 60 / 80 / 100 km/h. In race mode
+  `elm327.cpp` polls only `010C0D` with a `millis()` timestamp; `DashData` snapshots
+  are copied under a mutex so the UI never renders a half-updated sample.
 
 ## Wiring notes
 

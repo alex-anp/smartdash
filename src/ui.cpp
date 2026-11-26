@@ -15,10 +15,13 @@
 #include "ui.h"
 
 #include <math.h>
+#include <freertos/FreeRTOS.h>
 
 #include "config.h"
 #include "display.h"
+#include "dragrace.h"
 #include "elm327.h"
+#include "storage.h"
 
 namespace {
 
@@ -43,10 +46,16 @@ constexpr int RPM_SCALE_LABEL_R = 122;
 LGFX_Sprite canvas(&display_get());
 bool canvas_ok = false;
 
-DashData cur;       // Последние значения (анимация или ELM)
+DashData cur;       // Последние значения (анимация или ELM), только UI-задача
 DashData drawn;     // Что сейчас нарисовано в спрайте
 bool dirty = true;  // Хотя бы один виджет отличается от drawn
 bool static_drawn = false;
+
+// Snapshot из BLE-задачи. Он копируется под мьютексом и забирается в ui_loop(),
+// чтобы cur не менялся прямо во время отрисовки (и чтобы был таймштамп сэмпла).
+DashData latest;
+bool haveLatest = false;
+portMUX_TYPE dataMux = portMUX_INITIALIZER_UNLOCKED;
 
 // Одноразовая стартовая анимация вместо бесконечного демо. Идёт, только пока ELM
 // не подключён; 40 шагов × 100 мс ≈ 4 секунды, затем все значения остаются нулями.
@@ -56,8 +65,37 @@ uint32_t last_sweep_ms = 0;
 int sweep_step = 0;
 bool sweep_done = false;
 
-enum class Screen { Dash, ElmConnect };
+enum class Screen { Dash, ElmConnect, Drag };
 Screen screen = Screen::Dash;
+
+// Порядок экранов для свайпов: вверх — вперёд, вниз — назад.
+// Старое поведение сохранено: со смартборда свайп вверх всё ещё открывает ELM.
+const Screen screenOrder[] = {Screen::Dash, Screen::ElmConnect, Screen::Drag};
+constexpr int SCREEN_COUNT = sizeof(screenOrder) / sizeof(screenOrder[0]);
+
+int screenIndex(Screen s) {
+  for (int i = 0; i < SCREEN_COUNT; i++) {
+    if (screenOrder[i] == s) return i;
+  }
+  return 0;
+}
+
+Screen nextScreen(Screen s, int dir) {
+  int i = screenIndex(s) + dir;
+  if (i < 0) i = SCREEN_COUNT - 1;
+  if (i >= SCREEN_COUNT) i = 0;
+  return screenOrder[i];
+}
+
+void switchScreen(Screen next);  // определено ниже, после draw_* и saveDragResult
+
+// Состояние экрана замера разгона.
+uint16_t dragTarget = DRAG_TARGET_DEFAULT;  // 60 / 80 / 100, меняется тапом
+bool dragDemo = false;                      // синтетика, если ELM не подключён
+uint32_t dragDemoStart = 0;
+uint32_t lastDragDraw = 0;
+bool dragScreenDirty = true;
+DragState lastDragState = DragState::Disabled;
 
 // Три точки «поиска» сменяются каждые 260 мс. Та же фаза используется для точек
 // в заголовке ELM Connect; drawn_dot_phase нужен для частичной перерисовки.
@@ -405,10 +443,128 @@ void draw_elm_screen() {
   flush();
 }
 
+// "3.10" = 3 с 10 сотых. Для замеров длиннее 100 с добавляем минуты.
+void format_cs(uint32_t cs, char* buf, size_t len) {
+  if (cs >= 10000) {
+    snprintf(buf, len, "%u:%02u.%02u", (unsigned)(cs / 6000),
+             (unsigned)((cs % 6000) / 100), (unsigned)(cs % 100));
+  } else {
+    snprintf(buf, len, "%u.%02u", (unsigned)(cs / 100), (unsigned)(cs % 100));
+  }
+}
+
+// Сохраняем последний и лучший замер. В журнал подключений пишем строку целиком,
+// чтобы потом можно было сравнить результат с реальным логом ELM.
+void saveDragResult() {
+  DragResult r = drag_result();
+  String line = drag_serialize(r);
+  storage_save_drag_last(line);
+
+  String best = storage_get_drag_best();
+  bool better = best.length() == 0;
+  if (r.abort == DragAbort::None && best.length() > 0) {
+    better = drag_serialized_total(line) < drag_serialized_total(best);
+  }
+  if (better) storage_save_drag_best(line);
+  storage_log("DRAG %s", line.c_str());
+}
+
+// Экран замера: состояние, живой таймер и таблица отметок 10..100 км/ч.
+// Полная перерисовка раз в 100 мс дешевле, чем отслеживание отдельных зон,
+// и не мешает BLE-задаче (весь вывод идёт в спрайт на UI-ядре).
+void draw_drag_screen() {
+  auto& d = g();
+  DragState st = drag_state();
+  DragResult r = drag_result();
+
+  d.fillScreen(TFT_BLACK);
+  d.setTextDatum(middle_center);
+
+  char head[24];
+  snprintf(head, sizeof(head), "DRAG 0-%d KM/H", dragTarget);
+  d.setTextColor(TFT_WHITE, TFT_BLACK);
+  d.drawString(head, SCREEN_CENTER_X, 24, 2);
+
+  d.setTextColor(0x8410, TFT_BLACK);
+  d.drawString("TAP: TARGET 60/80/100", SCREEN_CENTER_X, 48, 1);
+
+  const char* stateText = "IDLE";
+  uint16_t stateColor = 0x8410;
+  switch (st) {
+    case DragState::Waiting:  stateText = "WAIT IDLE RPM"; stateColor = TFT_ORANGE; break;
+    case DragState::Armed:    stateText = "ARMED - GO!";   stateColor = TFT_GREEN;  break;
+    case DragState::Running:  stateText = "RUNNING";       stateColor = TFT_GREEN;  break;
+    case DragState::Finished: stateText = "DONE";          stateColor = TFT_CYAN;   break;
+    case DragState::Aborted:  stateText = drag_abort_text(r.abort); stateColor = TFT_RED; break;
+    default: break;
+  }
+  d.setTextColor(stateColor, TFT_BLACK);
+  d.drawString(stateText, SCREEN_CENTER_X, 68, 2);
+
+  uint32_t shown_cs = 0;
+  if (st == DragState::Running) shown_cs = drag_elapsed_cs();
+  else if (st == DragState::Finished || st == DragState::Aborted) shown_cs = r.total_cs;
+  char tbuf[16];
+  format_cs(shown_cs, tbuf, sizeof(tbuf));
+  d.setTextColor(st == DragState::Aborted ? TFT_RED : TFT_WHITE, TFT_BLACK);
+  d.drawString(tbuf, SCREEN_CENTER_X, 96, 4);
+
+  d.setTextDatum(middle_left);
+  d.setTextColor(0x8410, TFT_BLACK);
+  d.drawString("KM/H", 48, 122, 1);
+  d.drawString("TIME", 138, 122, 1);
+  d.drawString("SPLIT", 248, 122, 1);
+  d.drawFastHLine(40, 132, 280, 0x2104);
+
+  for (int i = 0; i < DRAG_MAX_SPLITS; i++) {
+    int k = (i + 1) * DRAG_SPLIT_STEP;
+    int y = 142 + i * 17;
+
+    // Следующая недостигнутая отметка подсвечивается, чтобы было видно цель.
+    bool next = st == DragState::Running && !r.has[i] && (i == 0 || r.has[i - 1]);
+    uint16_t color = r.has[i] ? (next ? TFT_GREEN : TFT_WHITE) : (next ? TFT_ORANGE : 0x4208);
+
+    char buf[12];
+    snprintf(buf, sizeof(buf), "%d", k);
+    d.setTextColor(color, TFT_BLACK);
+    d.drawString(buf, 48, y, 2);
+
+    if (r.has[i]) {
+      format_cs(r.split_cs[i], buf, sizeof(buf));
+      d.drawString(buf, 138, y, 2);
+      format_cs(r.delta_cs[i], buf, sizeof(buf));
+      d.drawString(buf, 248, y, 2);
+    } else {
+      d.drawString("--.--", 138, y, 2);
+      d.drawString("--.--", 248, y, 2);
+    }
+  }
+
+  d.setTextDatum(middle_center);
+  d.setTextColor(0x8410, TFT_BLACK);
+  d.drawString("SWIPE / BTN - EXIT", SCREEN_CENTER_X, 322, 1);
+  flush();
+}
+
 // Тап-зоны только на экране ELM. На дашборде тапы игнорируются: навигация там
 // свайпом или кнопкой, чтобы во время езды случайно не сменить режим.
 void handle_tap(int32_t x, int32_t y) {
-  if (screen == Screen::Dash) return;  // Свайп вверх открывает экран ELM.
+  if (screen == Screen::Dash) return;
+
+  // На экране замера тап по заголовку меняет цель и начинает новый замер.
+  if (screen == Screen::Drag) {
+    if (y < 56 && drag_state() != DragState::Running) {
+      if (dragTarget == 60) dragTarget = 80;
+      else if (dragTarget == 80) dragTarget = 100;
+      else dragTarget = 60;
+      drag_begin(dragTarget);
+      dragDemoStart = millis();
+      dragScreenDirty = true;
+    }
+    return;
+  }
+
+  if (screen != Screen::ElmConnect) return;
 
   if (in_rect(x, y, 130, 94, 230, 122)) {
     connectTarget = "";
@@ -457,13 +613,9 @@ void poll_touch() {
           now - touch.lastClick > 150) {
         touch.swipeHandled = true;
         touch.lastClick = now;
-        if (dy < 0 && screen == Screen::Dash) {
-          SD_LOGln("[UI] swipe up -> ELM connect");
-          ui_show_elm_connect();
-        } else if (dy > 0 && screen == Screen::ElmConnect) {
-          SD_LOGln("[UI] swipe down -> dash");
-          ui_hide_elm_connect();
-        }
+        Screen next = nextScreen(screen, dy < 0 ? +1 : -1);
+        SD_LOGln("[UI] swipe -> screen %d", (int)next);
+        switchScreen(next);
       }
     }
     return;
@@ -495,10 +647,51 @@ void poll_button() {
   if (level && !last && millis() - touch.lastClick > 250) {
     touch.lastClick = millis();
     SD_LOGln("[UI] button press");
-    if (screen == Screen::Dash) ui_show_elm_connect();
-    else ui_hide_elm_connect();
+    switchScreen(nextScreen(screen, +1));
   }
   last = level;
+}
+
+// Единая смена экрана. Любой экран перезаписал спрайт целиком, поэтому после
+// перехода принудительно инвалидируем статику и все кэши виджетов дашборда.
+void switchScreen(Screen next) {
+  if (screen == next) return;
+  Screen prev = screen;
+  screen = next;
+
+  if (prev == Screen::Drag) {
+    drag_cancel();
+    elm_set_race_mode(false);
+    dragDemo = false;
+  }
+
+  static_drawn = false;
+  drawn.rpm = -999;
+  drawn.speed_kmh = -999;
+  drawn.coolant_c = -999;
+  drawn.volt = -999;
+  drawn.connected = !cur.connected;
+  drawn_dot_phase = -1;
+  dirty = true;
+
+  if (screen == Screen::ElmConnect) {
+    connectTarget = "";
+    elm_screen_dirty = true;
+    last_elm_draw = 0;
+    // Поиск/подключение живут в elmTask и продолжаются при любой навигации:
+    // открытие или закрытие экрана не должно сбрасывать состояние сканера.
+    draw_elm_screen();
+  } else if (screen == Screen::Drag) {
+    drag_begin(dragTarget);
+    dragDemo = !elm_is_connected();
+    elm_set_race_mode(elm_is_connected());
+    dragDemoStart = millis();
+    dragScreenDirty = true;
+    lastDragState = drag_state();
+    draw_drag_screen();
+  } else {
+    ui_show_dash();
+  }
 }
 
 }  // namespace
@@ -525,13 +718,38 @@ void ui_init() {
   last_sweep_ms = millis();
   sweep_step = 0;
   sweep_done = false;
+
+  latest = {};
+  haveLatest = false;
+  dragTarget = DRAG_TARGET_DEFAULT;
+  dragDemo = false;
+  dragDemoStart = 0;
+  lastDragDraw = 0;
+  dragScreenDirty = true;
+  lastDragState = DragState::Disabled;
 }
 
-// Вызывается из BLE-задачи. Только сохраняет снимок и поднимает флаг dirty;
-// сама отрисовка остаётся на ядре UI, поэтому LGFX не используется из двух потоков.
+// Вызывается из BLE-задачи. Только сохраняет снимок под мьютексом; сама отрисовка
+// остаётся на ядре UI, поэтому LGFX не используется из двух потоков.
 void ui_set_data(const DashData& data) {
-  cur = data;
-  dirty = true;
+  portENTER_CRITICAL(&dataMux);
+  latest = data;
+  haveLatest = true;
+  portEXIT_CRITICAL(&dataMux);
+}
+
+// UI забирает только самый свежий снимок. cur меняется исключительно в ui_loop(),
+// поэтому отрисовка не видит «полуобновлённых» значений.
+bool ui_get_data(DashData& out) {
+  portENTER_CRITICAL(&dataMux);
+  if (!haveLatest) {
+    portEXIT_CRITICAL(&dataMux);
+    return false;
+  }
+  out = latest;
+  haveLatest = false;
+  portEXIT_CRITICAL(&dataMux);
+  return true;
 }
 
 // Стартовая заставка на 700 мс перед первым кадром дашборда.
@@ -557,38 +775,12 @@ void ui_show_search() {
   flush();
 }
 
-// Открываем ELM Connect. Новый поиск запускается только если нет активной связи,
-// поэтому просмотр экрана при подключении не рвёт сессию OBD.
-void ui_show_elm_connect() {
-  if (screen == Screen::ElmConnect) return;
-  screen = Screen::ElmConnect;
-  connectTarget = "";
-  elm_screen_dirty = true;
-  last_elm_draw = 0;
-  // Обновляем список устройств, только если нет работающего соединения с ELM.
-  if (!elm_is_connected()) elm_start_scan();
-  draw_elm_screen();
-}
+// Открываем ELM Connect только для просмотра состояния. Сам поиск и подключение
+// идут в фоновой задаче elmTask и не перезапускаются при смене экрана.
+void ui_show_elm_connect() { switchScreen(Screen::ElmConnect); }
 
-// Возврат на дашборд. Экран ELM перезаписал весь спрайт, поэтому и статический фон,
-// и все динамические значения нужно принудительно перерисовать.
-void ui_hide_elm_connect() {
-  if (screen == Screen::Dash) return;
-  screen = Screen::Dash;
-  static_drawn = false;  // Экран ELM перезаписал спрайт
-
-  // Кэшированные значения всё ещё равны cur, поэтому после перерисовки одного фона
-  // ui_show_dash() пропустила бы все динамические элементы. Принудительно обновляем
-  // все шкалы после возврата с экрана ELM.
-  drawn.rpm = -999;
-  drawn.speed_kmh = -999;
-  drawn.coolant_c = -999;
-  drawn.volt = -999;
-  drawn.connected = !cur.connected;
-  drawn_dot_phase = -1;
-  dirty = true;
-  ui_show_dash();
-}
+// Возврат на дашборд с принудительной перерисовкой спрайта.
+void ui_hide_elm_connect() { switchScreen(Screen::Dash); }
 
 // Рендер по «грязным» виджетам. У каждого виджета своё сравнение с кэшем, чтобы
 // при изменении только напряжения или точки статуса не перерисовывать дугу RPM.
@@ -623,10 +815,20 @@ void ui_loop() {
   uint32_t now = millis();
   bool connected = elm_is_connected();
 
+  // Забираем новый снимок из BLE-задачи до обработки ввода: экран замера
+  // получит сэмпл с таймштампом, а дашборд — актуальные значения.
+  DashData sample;
+  bool haveSample = ui_get_data(sample);
+  if (haveSample) {
+    cur = sample;
+    dirty = true;
+  }
+
   poll_touch();
   poll_button();
 
-  if (!connected && !sweep_done && now - last_sweep_ms >= SWEEP_INTERVAL_MS) {
+  // На экране замера стартовая анимация не нужна: там своя синтетика или ELM.
+  if (screen != Screen::Drag && !connected && !sweep_done && now - last_sweep_ms >= SWEEP_INTERVAL_MS) {
     last_sweep_ms = now;
 
     int s = sweep_step;
@@ -656,13 +858,53 @@ void ui_loop() {
     }
   }
 
-  if ((!connected || screen == Screen::ElmConnect) && now - last_dot_ms >= DOT_PERIOD_MS) {
+  if ((!connected || screen == Screen::ElmConnect) && screen != Screen::Drag &&
+      now - last_dot_ms >= DOT_PERIOD_MS) {
     last_dot_ms = now;
     dot_phase = (dot_phase + 1) % 3;
     dirty = true;
   }
 
-  if (screen == Screen::ElmConnect) {
+  if (screen == Screen::Drag) {
+    if (dragDemo) {
+      // Синтетика без мотоцикла: 1 с холостых, скачок оборотов, затем рампа
+      // скорости 0 -> 100 примерно за 12 с. Те же сэмплы, что и от ELM.
+      // millis() берём здесь, а не из `now` в начале ui_loop(): вход в экран
+      // и тап по заголовку меняют dragDemoStart уже после захвата now.
+      uint32_t sampleT = millis();
+      uint32_t e = sampleT - dragDemoStart;
+      int rpm;
+      int speed;
+      if (e < 1000) {
+        rpm = 1800;
+        speed = 0;
+      } else if (e < 1200) {
+        rpm = 6000;
+        speed = 0;
+      } else {
+        rpm = 6500;
+        speed = (int)((e - 1000) * 100 / 12000);
+        if (speed > 100) speed = 100;
+      }
+      drag_feed(sampleT, rpm, speed, true);
+    } else if (haveSample && cur.t_ms != 0) {
+      // Только новый снимок: повторная подача того же t_ms не двигает автомат
+      // (время холостых не накапливается и пересечения отметок не считаются).
+      drag_feed(cur.t_ms, cur.rpm, cur.speed_kmh, cur.connected);
+    }
+
+    DragState st = drag_state();
+    if (st != lastDragState) {
+      if (st == DragState::Finished || st == DragState::Aborted) saveDragResult();
+      lastDragState = st;
+      dragScreenDirty = true;
+    }
+    if (dragScreenDirty || now - lastDragDraw >= 100) {
+      lastDragDraw = now;
+      dragScreenDirty = false;
+      draw_drag_screen();
+    }
+  } else if (screen == Screen::ElmConnect) {
     // Вывод всего экрана стоит ~50 мс; не делаем его на каждый шаг точек.
     if (elm_screen_dirty || now - last_elm_draw >= 600) {
       last_elm_draw = now;

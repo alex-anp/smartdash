@@ -27,6 +27,7 @@ void elm_start_scan();                      // Отключиться и зан�
 void elm_connect_saved(const String& addr); // Искать адрес, сохранённый в NVS
 void elm_connect(const String& addr);       // Сохранить адрес и подключиться к нему
 bool elm_is_connected();                    // true только после завершения AT-инициализации
+void elm_set_race_mode(bool enabled);       // режим замена: только 010C0D с таймштампом
 
 // Состояние и найденные устройства для экрана подключения ELM.
 ElmStatus elm_status();
