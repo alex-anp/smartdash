@@ -36,8 +36,10 @@ namespace {
 constexpr uint32_t SCAN_TIME_MS = 4000;
 constexpr uint32_t CMD_TIMEOUT_MS = 1200;
 constexpr uint32_t POLL_GAP_MS = 120;       // Минимальная пауза между запросами OBD
-constexpr uint32_t RECONNECT_GAP_MS = 3000; // Пауза после отключения/неудачи подключения
 constexpr uint32_t CONNECT_TIMEOUT_MS = 6000;
+constexpr uint32_t STEADY_MS = 300000;      // 5 мин быстрых повторов после старта/потери связи
+constexpr uint32_t PAUSE_MIN = 2000;        // Быстрый повтор в окне STEADY_MS
+constexpr uint32_t PAUSE_MAX = 60000;       // Долгая стоянка: 2→4→8→…→60 с
 constexpr size_t MAX_FOUND = 8;             // Максимум строк в списке на экране
 
 // Объекты GATT принадлежат и используются только BLE-задачей. advDevice — копия
@@ -53,8 +55,12 @@ volatile bool connecting = false;
 volatile bool connected = false;
 volatile bool needScanRestart = false;
 volatile bool requestScanStart = false;
-uint32_t lastScanRestart = 0;
 uint32_t connectStartedAt = 0;
+uint32_t retryAt = 0;               // когда можно делать следующую попытку
+uint32_t reconnectGap = PAUSE_MIN;  // текущая пауза между неудачными попытками
+uint32_t steadyUntil = 0;           // до этого момента повторяем часто
+bool directConnectNext = false;     // следующая попытка — прямой connect к сохранённому MAC
+bool requestDirectConnect = false;  // запрос к рабочей задаче (аналог requestScanStart)
 String pendingAddr;                 // Адрес, к которому подключаемся; при успехе сохраняется в NVS
 volatile ElmStatus status = ElmStatus::Idle;
 volatile bool raceMode = false;  // экран замера: опрашиваем только обороты и скорость
@@ -128,6 +134,9 @@ void recordFound(const NimBLEAdvertisedDevice* d, bool compatible) {
 }
 
 String targetAddr;
+uint8_t targetType = BLE_ADDR_PUBLIC;       // тип адреса сохранённого адаптера
+bool targetTypeKnown = false;               // false = старая запись NVS без типа
+uint8_t pendingAddrType = BLE_ADDR_PUBLIC;  // тип адреса текущей попытки
 String rxBuf;
 
 // Если сохранённый MAC не отвечает (например, дешёвый адаптер сменил случайный
@@ -139,9 +148,31 @@ void noteTargetFailure() {
   if (++targetFailCount >= 3) {
     targetFailCount = 0;
     storage_log("TARGET fallback: scan any ELM");
-    elm_start_scan();
-    needScanRestart = false;  // elm_start_scan() сам поднял requestScanStart
+    targetAddr = "";
+    targetTypeKnown = false;
+    directConnectNext = false;
   }
+}
+
+// Единая точка планирования повтора. После потери выбранного адаптера или в
+// первые 5 минут после старта повторяем через 2 с; дальше пауза удваивается
+// до 60 с, чтобы долгий простой не жег батарею и не мешал телефону.
+void scheduleRetry(bool immediate, bool directNext) {
+  const uint32_t now = millis();
+  if (immediate) {
+    reconnectGap = PAUSE_MIN;
+    retryAt = now;
+  } else {
+    if (now >= steadyUntil && reconnectGap < PAUSE_MAX) {
+      reconnectGap *= 2;
+      if (reconnectGap > PAUSE_MAX) reconnectGap = PAUSE_MAX;
+    }
+    retryAt = now + (now < steadyUntil ? PAUSE_MIN : reconnectGap);
+  }
+  directConnectNext = directNext && targetAddr.length() > 0;
+  needScanRestart = true;
+  storage_log("RETRY in %u ms direct=%d", immediate ? 0u : (uint32_t)(retryAt - now),
+              directConnectNext ? 1 : 0);
 }
 
 DashData dash;
@@ -177,7 +208,9 @@ bool isElmName(const std::string& name) {
   String n = String(name.c_str());
   n.toUpperCase();
   return n.indexOf("OBD") >= 0 || n.indexOf("ELM") >= 0 || n.indexOf("V-LINK") >= 0 ||
-         n.indexOf("VEEPEAK") >= 0 || n.indexOf("OBDLINK") >= 0 || n.indexOf("VGATE") >= 0;
+         n.indexOf("VLINK") >= 0 || n.indexOf("ICAR") >= 0 || n.indexOf("VEEPEAK") >= 0 ||
+         n.indexOf("OBDLINK") >= 0 || n.indexOf("VGATE") >= 0 || n.indexOf("KONNWEI") >= 0 ||
+         n.indexOf("CARISTA") >= 0 || n.indexOf("MEATPI") >= 0;
 }
 
 // Многие BLE-адаптеры ELM327 передают один из этих UUID UART; проверка ловит
@@ -188,7 +221,8 @@ bool looksLikeElm(const NimBLEAdvertisedDevice* d) {
     for (int i = 0; i < d->getServiceUUIDCount(); i++) {
       String us = d->getServiceUUID(i).toString().c_str();
       us.toUpperCase();
-      if (us.indexOf("FFF0") >= 0 || us.indexOf("FFE0") >= 0 || us.indexOf("6E400001") >= 0) return true;
+      if (us.indexOf("FFF0") >= 0 || us.indexOf("FFE0") >= 0 || us.indexOf("18F0") >= 0 ||
+          us.indexOf("6E400001") >= 0) return true;
     }
   }
   return false;
@@ -221,7 +255,7 @@ class ScanCB : public NimBLEScanCallbacks {
   void onScanEnd(const NimBLEScanResults&, int) override {
     if (!connected && !connecting && !doConnect) {
       storage_log("SCAN end: no match");
-      needScanRestart = true;
+      scheduleRetry(false, false);
     }
   }
 };
@@ -236,6 +270,9 @@ class ClientCB : public NimBLEClientCallbacks {
   void onDisconnect(NimBLEClient*, int reason) override {
     SD_LOGln("[ELM] disconnected");
     storage_log("GATT onDisconnect reason=%d", reason);
+    // Потеря во время поездки — норма (отключилось питание адаптера): это не
+    // «не тот MAC», а значит не считаем неудачей и не уходим в scan any.
+    const bool wasConnected = connected;
     chrWrite = nullptr;
     chrNotify = nullptr;
     connected = false;
@@ -244,9 +281,14 @@ class ClientCB : public NimBLEClientCallbacks {
     cmdState = CMD_IDLE;
     dash.connected = false;
     pushData(dash);
-    needScanRestart = true;
-    lastScanRestart = 0;
-    noteTargetFailure();
+    if (wasConnected) {
+      targetFailCount = 0;
+      steadyUntil = millis() + STEADY_MS;
+      scheduleRetry(true, true);  // сразу тот же MAC, без сканирования
+    } else {
+      noteTargetFailure();
+      scheduleRetry(false, false);
+    }
   }
 };
 
@@ -279,6 +321,13 @@ bool useChars(NimBLERemoteCharacteristic* w, NimBLERemoteCharacteristic* n) {
 // Стандартные GAP/Device Info (2Axx) не подходят: в логе уже было
 // write=0x2a00 (Device Name), из-за чего AT-команды не доходили до адаптера.
 int uartScore(const String& u, bool write) {
+  // Vgate vLinker / iCar Pro: сервис 18F0, notify=2AF0, write=2AF1.
+  // Это единственные 2Axx, которые могут быть UART; 2A00 (Device Name)
+  // по-прежнему исключён, из-за него и появился этот запрет.
+  if (u == "2AF0" || u == "2AF1") {
+    if (write) return u == "2AF1" ? 95 : 70;
+    return u == "2AF0" ? 95 : 70;
+  }
   if (u.startsWith("2A")) return -1000;
   if (write) {
     if (u.indexOf("FFF1") >= 0 || u.indexOf("FFE1") >= 0) return 100;
@@ -325,20 +374,36 @@ bool pickChars(NimBLEClient* c) {
     }
   }
 
-  NimBLERemoteService* s = c->getService("FFF0");
-  if (!s) s = c->getService("fff0");
-  if (s) {
-    NimBLERemoteCharacteristic* f1 = s->getCharacteristic("FFF1");
-    if (!f1) f1 = s->getCharacteristic("fff1");
-    NimBLERemoteCharacteristic* f2 = s->getCharacteristic("FFF2");
-    if (!f2) f2 = s->getCharacteristic("fff2");
+  // Профиль из ESP32-S3-Touch-OBD2: у Vgate vLinker / iCar Pro BLE сервис 18F0,
+  // запись идёт в 2AF1, уведомления приходят от 2AF0. Пробуем его первым.
+  if (!chrWrite || !chrNotify) {
+    NimBLERemoteService* vg = c->getService("18F0");
+    if (!vg) vg = c->getService("18f0");
+    if (vg) {
+      NimBLERemoteCharacteristic* a0 = vg->getCharacteristic("2AF0");
+      if (!a0) a0 = vg->getCharacteristic("2af0");
+      NimBLERemoteCharacteristic* a1 = vg->getCharacteristic("2AF1");
+      if (!a1) a1 = vg->getCharacteristic("2af1");
+      if (useChars(a1, a0)) storage_log("PROFILE 18F0 write=2AF1 notify=2AF0");
+    }
+  }
 
-    // Проверенный профиль: FFF1 = уведомления, FFF2 = запись.
-    if (!useChars(f2, f1)) {
-      // У части клонов направление обратное: FFF1 = запись, FFF2 = уведомления.
-      if (!useChars(f1, f2)) {
-        // Одна характеристика на оба направления.
-        if (!useChars(f1, f1)) useChars(f2, f2);
+  if (!chrWrite || !chrNotify) {
+    NimBLERemoteService* s = c->getService("FFF0");
+    if (!s) s = c->getService("fff0");
+    if (s) {
+      NimBLERemoteCharacteristic* f1 = s->getCharacteristic("FFF1");
+      if (!f1) f1 = s->getCharacteristic("fff1");
+      NimBLERemoteCharacteristic* f2 = s->getCharacteristic("FFF2");
+      if (!f2) f2 = s->getCharacteristic("fff2");
+
+      // Проверенный профиль: FFF1 = уведомления, FFF2 = запись.
+      if (!useChars(f2, f1)) {
+        // У части клонов направление обратное: FFF1 = запись, FFF2 = уведомления.
+        if (!useChars(f1, f2)) {
+          // Одна характеристика на оба направления.
+          if (!useChars(f1, f1)) useChars(f2, f2);
+        }
       }
     }
   }
@@ -576,8 +641,12 @@ void handleInit() {
     initState = INIT_DONE;
     connected = true;
     targetFailCount = 0;
+    directConnectNext = true;  // следующая потеря связи: сразу к этому MAC
     pollLogBudget = 8;
-    storage_save_last_elm(pendingAddr);  // сохраняем только подтверждённый адаптер
+    // Сохраняем только подтверждённый адаптер и тип его адреса — он нужен
+    // для прямого reconnect без сканирования после перезагрузки.
+    storage_save_last_elm(pendingAddr);
+    storage_save_last_elm_type(pendingAddrType);
     setStatus(ElmStatus::Connected);
     dash.connected = true;
     pushData(dash);
@@ -603,8 +672,8 @@ void finishConnect() {
     client->disconnect();
     connecting = false;
     setStatus(ElmStatus::Idle);
-    needScanRestart = true;
     noteTargetFailure();
+    scheduleRetry(false, false);
     return;
   }
   connecting = false;
@@ -612,25 +681,26 @@ void finishConnect() {
   startInit();
 }
 
-// Инициируем асинхронное подключение. connect(addr, true, true, true) возвращается
-// сразу; завершение определяется через client->isConnected() в elm_loop().
-// Блокирующий connect() на этой плате мог остановить UI на несколько секунд.
-bool connectToAdv() {
-  if (!advDevice) return false;
+// Общий путь асинхронного подключения: и по найденному advertisement, и напрямую
+// к сохранённому MAC. connect(..., true) включает exchangeMTU и не блокирует UI.
+bool startConnect(const NimBLEAddress& addr, const String& addrText, uint8_t type, const char* how) {
   connecting = true;
   setStatus(ElmStatus::Connecting);
   initState = INIT_IDLE;
   cmdState = CMD_IDLE;
 
-  NimBLEAddress addr = advDevice->getAddress();
-  pendingAddr = String(addr.toString().c_str());
-  storage_log("CONNECT start addr=%s", pendingAddr.c_str());
+  pendingAddr = addrText;
+  pendingAddrType = type;
+  storage_log("CONNECT %s addr=%s type=%d", how, pendingAddr.c_str(), (int)type);
+
   client = NimBLEDevice::getClientByPeerAddress(addr);
   if (!client) client = NimBLEDevice::getDisconnectedClient();
   if (!client) {
     if (NimBLEDevice::getCreatedClientCount() >= NIMBLE_MAX_CONNECTIONS) {
       connecting = false;
       setStatus(ElmStatus::Idle);
+      storage_log("CONNECT no free client");
+      scheduleRetry(false, false);
       return false;
     }
     client = NimBLEDevice::createClient();
@@ -651,8 +721,8 @@ bool connectToAdv() {
       storage_log("CONNECT rejected by NimBLE addr=%s", pendingAddr.c_str());
       connecting = false;
       setStatus(ElmStatus::Idle);
-      needScanRestart = true;
       noteTargetFailure();
+      scheduleRetry(false, false);
       return false;
     }
     connectStartedAt = millis();
@@ -661,6 +731,21 @@ bool connectToAdv() {
 
   finishConnect();
   return true;
+}
+
+bool connectToAdv() {
+  if (!advDevice) return false;
+  NimBLEAddress addr = advDevice->getAddress();
+  return startConnect(addr, String(addr.toString().c_str()), addr.getType(), "adv");
+}
+
+// Прямое подключение без сканирования: адрес и тип адреса сохранены после
+// предыдущего успешного 0100. Если тип неизвестен (старая запись), пробуем
+// public; неудача всё равно приведёт к сканированию, где тип станет известен.
+bool connectToSavedAddr() {
+  if (targetAddr.length() == 0) return false;
+  NimBLEAddress addr(targetAddr.c_str(), targetType);
+  return startConnect(addr, targetAddr, targetType, "direct");
 }
 
 // Круговой опрос OBD. cmdPidStep выбирает и команду для отправки, и парсер для
@@ -786,6 +871,11 @@ void elm_start_scan() {
   dash.connected = false;
   pushData(dash);
   needScanRestart = false;
+  retryAt = 0;
+  reconnectGap = PAUSE_MIN;
+  steadyUntil = millis() + STEADY_MS;
+  directConnectNext = false;
+  requestDirectConnect = false;
   clearFound();
   setStatus(ElmStatus::Scanning);
   if (client && client->isConnected()) client->disconnect();
@@ -793,9 +883,13 @@ void elm_start_scan() {
   requestScanStart = true;  // блокирующий start() выполняет BLE-задача
 }
 
-// Стартовый путь: искать сохранённый в NVS MAC и подключиться к нему.
+// Стартовый путь: сначала подключаемся к сохранённому MAC напрямую, без 4-секундного
+// сканирования. При неудаче рабочая задача сама перейдёт к сканированию.
 void elm_connect_saved(const String& addr) {
   targetAddr = addr;
+  const int type = storage_get_last_elm_type();
+  targetTypeKnown = type >= 0;
+  targetType = targetTypeKnown ? (uint8_t)type : BLE_ADDR_PUBLIC;
   targetFailCount = 0;
   doConnect = false;
   connected = false;
@@ -805,11 +899,18 @@ void elm_connect_saved(const String& addr) {
   dash = {};
   pushData(dash);
   needScanRestart = false;
+  retryAt = 0;
+  reconnectGap = PAUSE_MIN;
+  steadyUntil = millis() + STEADY_MS;
+  requestScanStart = false;
+  requestDirectConnect = false;
+  directConnectNext = true;
   clearFound();
-  setStatus(ElmStatus::Scanning);
-  SD_LOG("[ELM] scan for %s\n", addr.c_str());
-  storage_log("AUTO target=%s", addr.c_str());
-  requestScanStart = true;
+  setStatus(ElmStatus::Connecting);
+  SD_LOG("[ELM] direct connect to %s\n", addr.c_str());
+  storage_log("AUTO direct addr=%s type=%d known=%d", addr.c_str(), (int)targetType,
+              targetTypeKnown ? 1 : 0);
+  requestDirectConnect = true;  // BLE-задача создаст NimBLEAddress и подключится
 }
 
 // Пользовательский путь: тап по строке на экране ELM перезапускает поиск с этим
@@ -819,6 +920,10 @@ void elm_connect(const String& addr) {
   targetFailCount = 0;
   doConnect = false;
   needScanRestart = false;
+  retryAt = 0;
+  steadyUntil = millis() + STEADY_MS;
+  requestDirectConnect = false;
+  directConnectNext = false;
   setStatus(ElmStatus::Scanning);
   SD_LOG("[ELM] connect to %s\n", addr.c_str());
   storage_log("TAP target=%s", addr.c_str());
@@ -840,6 +945,14 @@ void elm_loop() {
     connectToAdv();
   }
 
+  if (requestDirectConnect) {
+    requestDirectConnect = false;
+    if (targetAddr.length()) {
+      directConnectNext = false;  // одна прямая попытка, затем сканирование
+      connectToSavedAddr();
+    }
+  }
+
   if (connecting && client) {
     if (client->isConnected()) {
       SD_LOGln("[ELM] async connect done");
@@ -851,8 +964,8 @@ void elm_loop() {
       client->cancelConnect();
       connecting = false;
       setStatus(ElmStatus::Idle);
-      needScanRestart = true;
       noteTargetFailure();
+      scheduleRetry(false, false);
     }
   }
 
@@ -862,21 +975,25 @@ void elm_loop() {
       storage_log("INIT fail addr=%s", pendingAddr.c_str());
       if (client && client->isConnected()) client->disconnect();
       setStatus(ElmStatus::Idle);
-      needScanRestart = true;
       noteTargetFailure();
+      scheduleRetry(false, false);
     }
   }
 
   if (connected) handlePoll();
 
-  if (needScanRestart && !connected && !connecting && !doConnect) {
-    uint32_t now = millis();
-    if (now - lastScanRestart > RECONNECT_GAP_MS) {
-      lastScanRestart = now;
+  if (needScanRestart && !connected && !connecting && !doConnect && !requestDirectConnect) {
+    const uint32_t now = millis();
+    if ((int32_t)(now - retryAt) >= 0) {
       needScanRestart = false;
-      setStatus(ElmStatus::Scanning);
-      SD_LOGln("[ELM] restart scan");
-      NimBLEDevice::getScan()->start(SCAN_TIME_MS, false);
+      if (directConnectNext && targetAddr.length()) {
+        directConnectNext = false;
+        requestDirectConnect = true;
+      } else {
+        setStatus(ElmStatus::Scanning);
+        SD_LOGln("[ELM] restart scan");
+        NimBLEDevice::getScan()->start(SCAN_TIME_MS, false);
+      }
     }
   }
 }

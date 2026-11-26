@@ -22,6 +22,7 @@ static bool fsReady = false;
 
 static const char* NS = "smartdash";
 static const char* KEY_LAST_ELM = "last_elm";
+static const char* KEY_LAST_ELM_TYPE = "last_elm_type";
 static const char* KEY_DRAG_LAST = "drag_last";
 static const char* KEY_DRAG_BEST = "drag_best";
 static const char* KEY_LOG_BOOT = "log_boot";
@@ -51,8 +52,21 @@ void storage_save_last_elm(const String &addr) {
   prefs.putString(KEY_LAST_ELM, addr);
 }
 
+int storage_get_last_elm_type() {
+  uint32_t v = prefs.getUInt(KEY_LAST_ELM_TYPE, 0xFFFFFFFFu);
+  // 0 = BLE_ADDR_PUBLIC, 1 = BLE_ADDR_RANDOM. Старые записи без типа
+  // возвращают -1, чтобы драйвер сначала попробовал прямой connect, а при
+  // неудаче перешёл к сканированию и узнал тип из advertisement.
+  return v <= 1u ? (int)v : -1;
+}
+
+void storage_save_last_elm_type(uint8_t type) {
+  prefs.putUInt(KEY_LAST_ELM_TYPE, type);
+}
+
 void storage_clear_last_elm() {
   prefs.remove(KEY_LAST_ELM);
+  prefs.remove(KEY_LAST_ELM_TYPE);
 }
 
 String storage_get_drag_last() { return prefs.getString(KEY_DRAG_LAST, ""); }
