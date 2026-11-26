@@ -293,14 +293,37 @@ int uartScore(const String& u, bool write) {
   return 0;
 }
 
-// Ищем характеристики с записью и уведомлениями. Приоритетные профили:
-//   1) FFF0 / FFF1 / FFF2 и FFE0 / FFE1 — частые клоны ELM327 с BLE;
-//      у части адаптеров FFF1 работает и на запись, и на уведомления.
-//   2) Nordic UART Service — ещё одна распространённая прошивка адаптеров.
-//   3) любая подходящая пара — крайняя мера для неизвестных модулей.
+// Ищем характеристики с записью и уведомлениями. Важный момент из проекта
+// obd-ble-serial: у OBDLink CX и множества клонов FFF1 = Notify, FFF2 = Write,
+// то есть направление противоположно «очевидному». Сначала делаем полный
+// discovery GATT, затем пробуем именно этот профиль, потом остальные.
 bool pickChars(NimBLEClient* c) {
   chrWrite = nullptr;
   chrNotify = nullptr;
+
+  struct Cand {
+    NimBLERemoteCharacteristic* ch;
+    String uuid;
+    String svc;
+    bool write;
+    bool notify;
+  };
+  std::vector<Cand> cands;
+  // Полный discovery обязателен до getService(): часть адаптеров не отдаёт
+  // сервисы по одиночному запросу сразу после connection event. Заодно пишем
+  // таблицу GATT в журнал — пригодится для диагностики.
+  for (auto* svc : c->getServices(true)) {
+    String su = svc->getUUID().toString().c_str();
+    su.toUpperCase();
+    su.replace("0X", "");
+    for (auto* ch : svc->getCharacteristics(true)) {
+      const String u = charUuid(ch);
+      const bool w = canWriteChar(ch);
+      const bool n = canNotifyChar(ch);
+      storage_log("GATT %s/%s w=%d n=%d", su.c_str(), u.c_str(), w ? 1 : 0, n ? 1 : 0);
+      if (w || n) cands.push_back({ch, u, su, w, n});
+    }
+  }
 
   NimBLERemoteService* s = c->getService("FFF0");
   if (!s) s = c->getService("fff0");
@@ -310,10 +333,10 @@ bool pickChars(NimBLEClient* c) {
     NimBLERemoteCharacteristic* f2 = s->getCharacteristic("FFF2");
     if (!f2) f2 = s->getCharacteristic("fff2");
 
-    // Обычный вариант: FFF1 = запись, FFF2 = уведомления.
-    if (!useChars(f1, f2)) {
-      // У части клонов направление обратное: FFF2 = запись, FFF1 = уведомления.
-      if (!useChars(f2, f1)) {
+    // Проверенный профиль: FFF1 = уведомления, FFF2 = запись.
+    if (!useChars(f2, f1)) {
+      // У части клонов направление обратное: FFF1 = запись, FFF2 = уведомления.
+      if (!useChars(f1, f2)) {
         // Одна характеристика на оба направления.
         if (!useChars(f1, f1)) useChars(f2, f2);
       }
@@ -344,27 +367,6 @@ bool pickChars(NimBLEClient* c) {
     }
   }
 
-  struct Cand {
-    NimBLERemoteCharacteristic* ch;
-    String uuid;
-    String svc;
-    bool write;
-    bool notify;
-  };
-  std::vector<Cand> cands;
-  // Полная таблица GATT пишется в журнал всегда — пригодится для диагностики.
-  for (auto* svc : c->getServices(true)) {
-    String su = svc->getUUID().toString().c_str();
-    su.toUpperCase();
-    su.replace("0X", "");
-    for (auto* ch : svc->getCharacteristics(true)) {
-      const String u = charUuid(ch);
-      const bool w = canWriteChar(ch);
-      const bool n = canNotifyChar(ch);
-      storage_log("GATT %s/%s w=%d n=%d", su.c_str(), u.c_str(), w ? 1 : 0, n ? 1 : 0);
-      if (w || n) cands.push_back({ch, u, su, w, n});
-    }
-  }
   if (!chrWrite || !chrNotify) {
     // Крайняя мера: выбираем лучшую пару среди всех подходящих характеристик.
     int best = -1;
