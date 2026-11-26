@@ -77,6 +77,7 @@ void clearFound() {
 
 // Добавить или обновить результат сканирования. Если список фиксированного размера
 // заполнен, заменяем запись с самым слабым RSSI, чтобы ближайшие адаптеры оставались видимыми.
+// Массив всегда отсортирован по убыванию RSSI: сильнейший сигнал первый.
 void recordFound(const NimBLEAdvertisedDevice* d, bool compatible) {
   const String addr = String(d->getAddress().toString().c_str());
   if (!addr.length()) return;
@@ -107,6 +108,21 @@ void recordFound(const NimBLEAdvertisedDevice* d, bool compatible) {
   snprintf(found[idx].name, sizeof(found[idx].name), "%s", name.c_str());
   found[idx].rssi = d->getRSSI();
   found[idx].compatible = compatible;
+
+  // Переставляем запись в нужное место: вверх при усилении сигнала,
+  // вниз при ослаблении. Остальные записи уже отсортированы.
+  while (idx > 0 && found[idx].rssi > found[idx - 1].rssi) {
+    ElmScanEntry tmp = found[idx - 1];
+    found[idx - 1] = found[idx];
+    found[idx] = tmp;
+    idx--;
+  }
+  while (idx + 1 < (int)foundCount && found[idx].rssi < found[idx + 1].rssi) {
+    ElmScanEntry tmp = found[idx + 1];
+    found[idx + 1] = found[idx];
+    found[idx] = tmp;
+    idx++;
+  }
   portEXIT_CRITICAL(&foundMux);
 }
 
