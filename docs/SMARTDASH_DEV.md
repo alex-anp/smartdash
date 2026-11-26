@@ -31,7 +31,7 @@
 - [x] Swipe up opens ELM Connect, swipe down closes it, left/right toggles Dash <-> Drag
 - [x] NVS storage for last connected ELM MAC and drag results
 - [x] Persistent ELM connection log in LittleFS (`log`, `log all`, `clear` over USB)
-- [x] Drag screen: idle wait, launch detection, 10 km/h splits, demo ramp, last/best result
+- [x] Drag screen: idle wait, speed-based launch, 10 km/h splits, demo ramp, per-target best, raw sample log
 - [x] Wi-Fi AP started; HTTP root is still a placeholder
 - [ ] Full web config forms (RPM limits, units, colors)
 - [ ] Test with a real ELM327 on the motorcycle

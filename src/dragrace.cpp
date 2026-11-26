@@ -17,8 +17,8 @@ constexpr int IDLE_RPM_MIN = 1500;
 constexpr int IDLE_RPM_MAX = 2500;
 constexpr uint32_t IDLE_HOLD_MS = 800;     // сколько держать холостые перед-arm
 constexpr int RPM_JUMP = 600;              // рост оборотов от холостых
-constexpr int MIN_LAUNCH_SPEED = 2;        // защита от «газовки» на месте
-constexpr uint32_t RUN_TIMEOUT_MS = 60000; // защита от вечного замена
+constexpr int MIN_LAUNCH_SPEED = 3;        // защита от «газовки» на месте; старт по скорости
+constexpr uint32_t RUN_TIMEOUT_MS = 60000; // защита от вечного замера
 constexpr int STALL_RPM = 1000;            // ниже — считаем, что мотор заглох
 
 DragState state = DragState::Disabled;
@@ -28,6 +28,8 @@ uint16_t target = DRAG_TARGET_DEFAULT;
 uint32_t idleSince = 0;
 int idleRpm = 0;
 uint32_t launchT = 0;
+uint32_t launchSpeedT = 0;   // интерполированный момент пересечения скорости старта
+bool launchSpeedSeen = false;
 
 bool havePrev = false;
 uint32_t prevT = 0;
@@ -64,6 +66,8 @@ void drag_begin(uint16_t t) {
   idleSince = 0;
   idleRpm = 0;
   launchT = 0;
+  launchSpeedT = 0;
+  launchSpeedSeen = false;
   havePrev = false;
   savedSplits = 0;
 }
@@ -78,7 +82,7 @@ bool drag_active() {
 }
 
 // t_ms — millis() в момент получения сэмпла, rpm/speed — значения OBD,
-// connected=false означает потерю ELM во время замена.
+// connected=false означает потерю ELM во время замера.
 void drag_feed(uint32_t t_ms, int rpm, int speed_kmh, bool connected) {
   if (state == DragState::Disabled || state == DragState::Finished || state == DragState::Aborted) return;
 
@@ -105,10 +109,17 @@ void drag_feed(uint32_t t_ms, int rpm, int speed_kmh, bool connected) {
     }
   } else if (state == DragState::Armed) {
     int threshold = idleRpm + RPM_JUMP;
-    // Рост оборотов сам по себе может быть просто газовкой на месте, поэтому
-    // старт фиксируем только когда скорость уже пошла.
-    if (rpm >= threshold && speed_kmh >= MIN_LAUNCH_SPEED) {
-      launchT = havePrev ? crossTime(prevT, prevRpm, t_ms, rpm, threshold) : t_ms;
+    // Рост оборотов может быть просто газовкой на месте. Поэтому скачок оборотов
+    // лишь подтверждает старт, а отсчёт идёт от пересечения скорости 3 км/ч —
+    // как в анализе AURA, где старт ищут по ускорению, а не по оборотам.
+    if (!launchSpeedSeen && speed_kmh >= MIN_LAUNCH_SPEED) {
+      launchSpeedT = (havePrev && prevSpeed < MIN_LAUNCH_SPEED && speed_kmh > prevSpeed)
+                         ? crossTime(prevT, prevSpeed, t_ms, speed_kmh, MIN_LAUNCH_SPEED)
+                         : t_ms;
+      launchSpeedSeen = true;
+    }
+    if (launchSpeedSeen && rpm >= threshold) {
+      launchT = launchSpeedT;
       state = DragState::Running;
     }
   } else if (state == DragState::Running) {

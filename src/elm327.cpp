@@ -186,11 +186,22 @@ uint32_t cmdSentAt = 0;
 uint32_t cmdTimeout = CMD_TIMEOUT_MS;
 uint8_t cmdPidStep = 0;
 
-// Таймштамп ставим здесь, в BLE-задаче, в момент разбора ответа — UI получит
-// его вместе со значениями и сможет интерполировать отметки замера.
-void pushData(const DashData& d) {
+// Таймштамп ставим в BLE-задаче. Для ответа OBD берём середину интервала
+// запрос→ответ: значение EFI относится к моменту обработки команды, а не к моменту,
+// когда парсер дочитал последний байт. Для служебных снимков tx/rx остаются нулями.
+void pushData(const DashData& d, bool fromCmd = false) {
   DashData snap = d;
-  snap.t_ms = millis();
+  const uint32_t now = millis();
+  if (fromCmd && cmdSentAt != 0) {
+    snap.t_tx_ms = cmdSentAt;
+    snap.t_rx_ms = now;
+    // Безопасная середина даже при переполнении millis(): разница < 2^31.
+    snap.t_ms = snap.t_tx_ms + (uint32_t)(now - snap.t_tx_ms) / 2;
+  } else {
+    snap.t_tx_ms = 0;
+    snap.t_rx_ms = 0;
+    snap.t_ms = now;
+  }
   ui_set_data(snap);
 }
 
@@ -771,7 +782,8 @@ void handlePoll() {
         dash.speed_kmh = bytes[0];
       }
       dash.connected = true;
-      pushData(dash);
+      // При таймауте '>' нет — это не свежий ответ, середину интервала не используем.
+      pushData(dash, resp.indexOf('>') >= 0);
       lastPoll = now;
       return;
     }
@@ -817,7 +829,7 @@ void handlePoll() {
       }
     }
     dash.connected = true;
-    pushData(dash);
+    pushData(dash, resp.indexOf('>') >= 0);
     cmdPidStep++;
     lastPoll = now;
     return;

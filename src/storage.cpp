@@ -24,7 +24,7 @@ static const char* NS = "smartdash";
 static const char* KEY_LAST_ELM = "last_elm";
 static const char* KEY_LAST_ELM_TYPE = "last_elm_type";
 static const char* KEY_DRAG_LAST = "drag_last";
-static const char* KEY_DRAG_BEST = "drag_best";
+static const char* KEY_DRAG_BEST_OLD = "drag_best";  // совместимость со старой прошивкой
 static const char* KEY_LOG_BOOT = "log_boot";
 
 static const char* LOG_PATH = "/elm.log";
@@ -71,8 +71,32 @@ void storage_clear_last_elm() {
 
 String storage_get_drag_last() { return prefs.getString(KEY_DRAG_LAST, ""); }
 void storage_save_drag_last(const String& line) { prefs.putString(KEY_DRAG_LAST, line); }
-String storage_get_drag_best() { return prefs.getString(KEY_DRAG_BEST, ""); }
-void storage_save_drag_best(const String& line) { prefs.putString(KEY_DRAG_BEST, line); }
+
+// Ключ лучшего результата включает цель: 0-60 и 0-100 не должны перезаписывать
+// друг друга. Буфера достаточно для "drag_best_100" и завершающего '\0'.
+static void dragBestKey(uint16_t target, char* key, size_t len) {
+  snprintf(key, len, "drag_best_%u", (unsigned)target);
+}
+
+String storage_get_drag_best(uint16_t target) {
+  char key[20];
+  dragBestKey(target, key, sizeof(key));
+  String line = prefs.getString(key, "");
+  if (line.length()) return line;
+
+  // Старая прошивка хранила один общий best. Переносим его только если цель
+  // совпадает с запрошенной — иначе 0-60 снова стал бы рекордом 0-100.
+  String old = prefs.getString(KEY_DRAG_BEST_OLD, "");
+  int comma = old.indexOf(',');
+  if (comma > 0 && (uint16_t)old.substring(0, comma).toInt() == target) return old;
+  return "";
+}
+
+void storage_save_drag_best(uint16_t target, const String& line) {
+  char key[20];
+  dragBestKey(target, key, sizeof(key));
+  prefs.putString(key, line);
+}
 
 // Одна строка журнала. Переносы строк из ответов ELM заменяются на '|'.
 void storage_log(const char* fmt, ...) {

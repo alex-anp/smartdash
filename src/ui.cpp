@@ -449,12 +449,14 @@ void saveDragResult() {
   String line = drag_serialize(r);
   storage_save_drag_last(line);
 
-  String best = storage_get_drag_best();
-  bool better = best.length() == 0;
-  if (r.abort == DragAbort::None && best.length() > 0) {
-    better = drag_serialized_total(line) < drag_serialized_total(best);
+  // Лучший результат хранится отдельно по целям: время 0-60 не должно
+  // считаться рекордом 0-100. Прерванный замер в рекорды не идёт.
+  if (r.abort == DragAbort::None) {
+    String best = storage_get_drag_best(r.target);
+    if (best.length() == 0 || drag_serialized_total(line) < drag_serialized_total(best)) {
+      storage_save_drag_best(r.target, line);
+    }
   }
-  if (better) storage_save_drag_best(line);
   storage_log("DRAG %s", line.c_str());
 }
 
@@ -894,7 +896,14 @@ void ui_loop() {
     } else if (haveSample && cur.t_ms != 0) {
       // Только новый снимок: повторная подача того же t_ms не двигает автомат
       // (время холостых не накапливается и пересечения отметок не считаются).
+      const DragState before = drag_state();
       drag_feed(cur.t_ms, cur.rpm, cur.speed_kmh, cur.connected);
+      // Сырые сэмплы нужны, чтобы потом пересчитать замер с другими порогами.
+      // Пишем только от Armed до финиша, иначе ожидание холостых засоряет журнал.
+      if (before == DragState::Armed || before == DragState::Running) {
+        storage_log("DRAG S t=%u tx=%u rx=%u rpm=%d spd=%d",
+                    cur.t_ms, cur.t_tx_ms, cur.t_rx_ms, cur.rpm, cur.speed_kmh);
+      }
     }
 
     DragState st = drag_state();
