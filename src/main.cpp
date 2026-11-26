@@ -28,6 +28,8 @@ void setup() {
   delay(100);
 
   storage_init();  // Открыть NVS до первого чтения сохранённого адреса ELM
+  storage_log("BOOT");
+  Serial.println("SmartDash: 'log' - ELM log tail, 'log all' - full, 'clear' - reset");
   display_init();  // ST77916 + подсветка + CST816S
   ui_init();       // Выделить спрайт и сбросить кэши отрисовки
   ui_show_boot();  // Короткая заставка перед дашбордом
@@ -47,5 +49,6 @@ void setup() {
 void loop() {
   ui_loop();    // Ввод, стартовая анимация, точки статуса и перерисовка виджетов
   web_loop();   // Обработать один ожидающий HTTP-запрос, если он есть
+  storage_serial_loop();  // Команды 'log' / 'clear' через USB Serial
   delay(2);     // Отдать управление планировщику; опрос OBD раз в 120 мс — в elmTask
 }

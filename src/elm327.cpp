@@ -37,7 +37,7 @@ constexpr uint32_t SCAN_TIME_MS = 4000;
 constexpr uint32_t CMD_TIMEOUT_MS = 1200;
 constexpr uint32_t POLL_GAP_MS = 120;       // Минимальная пауза между запросами OBD
 constexpr uint32_t RECONNECT_GAP_MS = 3000; // Пауза после отключения/неудачи подключения
-constexpr uint32_t CONNECT_TIMEOUT_MS = 4000;
+constexpr uint32_t CONNECT_TIMEOUT_MS = 6000;
 constexpr size_t MAX_FOUND = 8;             // Максимум строк в списке на экране
 
 // Объекты GATT принадлежат и используются только BLE-задачей. advDevice — копия
@@ -113,8 +113,23 @@ void recordFound(const NimBLEAdvertisedDevice* d, bool compatible) {
 String targetAddr;
 String rxBuf;
 
+// Если сохранённый MAC не отвечает (например, дешёвый адаптер сменил случайный
+// адрес), после нескольких неудач возвращаемся к поиску любого совместимого ELM.
+uint8_t targetFailCount = 0;
+void noteTargetFailure() {
+  if (targetAddr.length() == 0) return;
+  storage_log("TARGET fail %u/3 addr=%s", targetFailCount + 1, targetAddr.c_str());
+  if (++targetFailCount >= 3) {
+    targetFailCount = 0;
+    storage_log("TARGET fallback: scan any ELM");
+    elm_start_scan();
+    needScanRestart = false;  // elm_start_scan() сам поднял requestScanStart
+  }
+}
+
 DashData dash;
 uint32_t lastPoll = 0;
+uint8_t pollLogBudget = 0;  // первые несколько ответов опроса пишем в журнал
 
 enum CmdState { CMD_IDLE, CMD_WAIT };
 CmdState cmdState = CMD_IDLE;
@@ -170,6 +185,9 @@ class ScanCB : public NimBLEScanCallbacks {
     if (!match && targetAddr.length() == 0 && compatible) match = true;
     if (match) {
       SD_LOG("[ELM] match %s %s\n", addr.c_str(), name.c_str());
+      storage_log("MATCH addr=%s name=%s rssi=%d target=%s", addr.c_str(),
+                  name.c_str(), d->getRSSI(),
+                  targetAddr.length() ? "saved" : "any");
       NimBLEDevice::getScan()->stop();
       if (advDevice) delete advDevice;
       advDevice = new NimBLEAdvertisedDevice(*d);
@@ -178,16 +196,23 @@ class ScanCB : public NimBLEScanCallbacks {
   }
 
   void onScanEnd(const NimBLEScanResults&, int) override {
-    if (!connected && !connecting && !doConnect) needScanRestart = true;
+    if (!connected && !connecting && !doConnect) {
+      storage_log("SCAN end: no match");
+      needScanRestart = true;
+    }
   }
 };
 
 // Колбэк отключения должен сразу сбросить кэшированные характеристики и сообщить
 // UI; иначе после перезагрузки устройства были бы использованы устаревшие дескрипторы.
 class ClientCB : public NimBLEClientCallbacks {
-  void onConnect(NimBLEClient*) override { SD_LOGln("[ELM] connected"); }
-  void onDisconnect(NimBLEClient*, int) override {
+  void onConnect(NimBLEClient*) override {
+    SD_LOGln("[ELM] connected");
+    storage_log("GATT onConnect");
+  }
+  void onDisconnect(NimBLEClient*, int reason) override {
     SD_LOGln("[ELM] disconnected");
+    storage_log("GATT onDisconnect reason=%d", reason);
     chrWrite = nullptr;
     chrNotify = nullptr;
     connected = false;
@@ -198,6 +223,7 @@ class ClientCB : public NimBLEClientCallbacks {
     pushData(dash);
     needScanRestart = true;
     lastScanRestart = 0;
+    noteTargetFailure();
   }
 };
 
@@ -246,7 +272,11 @@ bool pickChars(NimBLEClient* c) {
   }
   SD_LOG("[ELM] write=%s notify=%s\n", chrWrite ? chrWrite->getUUID().toString().c_str() : "-",
                 chrNotify ? chrNotify->getUUID().toString().c_str() : "-");
-  return chrWrite != nullptr;
+  storage_log("CHARS write=%s notify=%s", chrWrite ? chrWrite->getUUID().toString().c_str() : "-",
+              chrNotify ? chrNotify->getUUID().toString().c_str() : "-");
+  // Без канала уведомлений адаптер не вернёт ни одного ответа на AT-команду,
+  // поэтому такой «половинчатый» профиль не считаем пригодным.
+  return chrWrite != nullptr && chrNotify != nullptr;
 }
 
 // Неблокирующий запрос AT/OBD: очищаем RX-буфер, пишем "CMD\r", запускаем таймаут.
@@ -257,7 +287,11 @@ bool sendCmdAsync(const String& cmd, uint32_t timeoutMs = CMD_TIMEOUT_MS) {
   rxBuf = "";
   portEXIT_CRITICAL(&rxMux);
   String out = cmd + "\r";
-  bool ok = chrWrite->writeValue((uint8_t*)out.c_str(), out.length(), !chrWrite->canWrite());
+  // WRITE_REQ можно запрашивать только у характеристики с флагом WRITE.
+  // У клонов с FFF1 = WRITE_NO_RSP старый код (!canWrite()) запрашивал
+  // неподдерживаемый WRITE_REQ и все AT-команды падали.
+  bool response = chrWrite->canWrite();
+  bool ok = chrWrite->writeValue((uint8_t*)out.c_str(), out.length(), response);
   if (!ok) return false;
   cmdPending = cmd;
   cmdSentAt = millis();
@@ -323,59 +357,140 @@ bool parsePid(const String& resp, uint8_t service, uint8_t pid, std::vector<int>
 // за такт отправляется следующая команда или забирается предыдущий ответ.
 enum InitState { INIT_IDLE, INIT_SEND, INIT_WAIT, INIT_DONE, INIT_FAIL };
 volatile int initState = INIT_IDLE;
+enum InitPhase { INIT_AT, INIT_PROTO, INIT_PID };
+InitPhase initPhase = INIT_AT;
 int initIdx = 0;
-// ATZ — сброс; отключаем эхо, переводы строк, пробелы и заголовки; включаем
-// автоопределение протокола; затем 0100 узнаёт поддерживаемые PID перед опросом.
-const char* initCmds[] = {"ATZ", "ATE0", "ATL0", "ATS0", "ATH0", "ATSP0", "0100"};
-constexpr int INIT_N = 7;
+
+// ATZ — сброс; отключаем эхо, переводы строк, пробелы и заголовки.
+const char* initCmds[] = {"ATZ", "ATE0", "ATL0", "ATS0", "ATH0"};
+constexpr int INIT_N = sizeof(initCmds) / sizeof(initCmds[0]);
+
+// По данным телефонного приложения мотоцикл работает по ISO 14230-4 KWP.
+// ATSP0 (авто) у дешёвых клонов ELM327 может искать протокол дольше, чем
+// ждёт прошивка, поэтому сначала пробуем явные KWP-варианты, затем авто.
+const char* protoCmds[] = {"ATSP5", "ATSP4", "ATSP0"};  // fast init / slow init / auto
+constexpr uint32_t protoPidTimeout[] = {6000, 6000, 8000};
+constexpr int PROTO_N = 3;
+uint8_t protoIdx = 0;
 
 void startInit() {
   initState = INIT_SEND;
+  initPhase = INIT_AT;
   initIdx = 0;
+  protoIdx = 0;
+  pollLogBudget = 0;
   cmdState = CMD_IDLE;
   setStatus(ElmStatus::Initializing);
+  storage_log("INIT start addr=%s", pendingAddr.c_str());
 }
 
-// Продвинуть автомат AT-инициализации на один шаг. Любая ошибка прерывает
-// подключение, чтобы цикл поиска мог попробовать другой адаптер.
+bool respHasError(const String& s) {
+  String u = s;
+  u.toUpperCase();
+  return u.indexOf("ERROR") >= 0 || u.indexOf("STOPPED") >= 0 || u.indexOf("NO DATA") >= 0;
+}
+
+// 0100 считается удачным только если пришел ответ сервиса 41 — иначе ELM
+// не нашёл ECU на выбранном протоколе, и нужно попробовать следующий.
+bool respHasPid(const String& s) { return s.indexOf("41") >= 0 && !respHasError(s); }
+
+// Продвинуть автомат AT-инициализации на один шаг. Ошибка на любом протоколе
+// не обрывает поиск сразу: перебираются ATSP5 -> ATSP4 -> ATSP0.
 void handleInit() {
-  if (initState == INIT_IDLE || initState == INIT_DONE || initState == INIT_FAIL) return;
+  if (initState != INIT_SEND && initState != INIT_WAIT) return;
+
   if (initState == INIT_SEND) {
-    uint32_t tmo = (strcmp(initCmds[initIdx], "ATZ") == 0 || strcmp(initCmds[initIdx], "0100") == 0) ? 2500 : 1200;
-    if (sendCmdAsync(initCmds[initIdx], tmo)) initState = INIT_WAIT;
+    const char* cmd = nullptr;
+    uint32_t tmo = CMD_TIMEOUT_MS;
+    switch (initPhase) {
+      case INIT_AT:
+        cmd = initCmds[initIdx];
+        tmo = (initIdx == 0) ? 2500 : 1200;  // ATZ отвечает дольше
+        break;
+      case INIT_PROTO:
+        cmd = protoCmds[protoIdx];
+        tmo = 1500;
+        break;
+      case INIT_PID:
+        cmd = "0100";
+        tmo = protoPidTimeout[protoIdx];
+        break;
+    }
+    if (sendCmdAsync(cmd, tmo)) initState = INIT_WAIT;
     else initState = INIT_FAIL;
     return;
   }
-  if (initState == INIT_WAIT) {
-    String resp;
-    if (!readCmdResult(resp)) return;
-    SD_LOG("[ELM] %s -> %s\n", initCmds[initIdx], resp.c_str());
-    initIdx++;
-    if (initIdx >= INIT_N) {
-      initState = INIT_DONE;
-      connected = true;
-      setStatus(ElmStatus::Connected);
-      dash.connected = true;
-      pushData(dash);
-      SD_LOGln("[ELM] init done");
-    } else {
-      initState = INIT_SEND;
+
+  String resp;
+  if (!readCmdResult(resp)) return;
+  const char* sent = initPhase == INIT_AT ? initCmds[initIdx]
+                     : initPhase == INIT_PROTO ? protoCmds[protoIdx]
+                                              : "0100";
+  (void)sent;  // при выключенных логах аргумент SD_LOG не используется
+  SD_LOG("[ELM] %s -> %s\n", sent, resp.c_str());
+  storage_log("AT %s -> %s", sent, resp.c_str());
+
+  if (initPhase == INIT_AT) {
+    if (respHasError(resp)) {
+      initState = INIT_FAIL;
+      return;
     }
+    if (++initIdx >= INIT_N) initPhase = INIT_PROTO;
+    initState = INIT_SEND;
+    return;
   }
+
+  if (initPhase == INIT_PROTO) {
+    if (respHasError(resp)) {
+      storage_log("PROTO %s rejected", protoCmds[protoIdx]);
+      if (++protoIdx >= PROTO_N) {
+        initState = INIT_FAIL;
+        return;
+      }
+    } else {
+      initPhase = INIT_PID;
+    }
+    initState = INIT_SEND;
+    return;
+  }
+
+  if (respHasPid(resp)) {
+    initState = INIT_DONE;
+    connected = true;
+    targetFailCount = 0;
+    pollLogBudget = 8;
+    storage_save_last_elm(pendingAddr);  // сохраняем только подтверждённый адаптер
+    setStatus(ElmStatus::Connected);
+    dash.connected = true;
+    pushData(dash);
+    SD_LOG("[ELM] init done, proto %s\n", protoCmds[protoIdx]);
+    storage_log("INIT done proto=%s addr=%s", protoCmds[protoIdx], pendingAddr.c_str());
+    return;
+  }
+
+  storage_log("PROTO %s no PID in 0100 -> next", protoCmds[protoIdx]);
+  if (++protoIdx >= PROTO_N) {
+    initState = INIT_FAIL;
+    return;
+  }
+  initPhase = INIT_PROTO;
+  initState = INIT_SEND;
 }
 
 void finishConnect() {
   if (!client) return;
   if (!pickChars(client)) {
     SD_LOGln("[ELM] no usable chars");
+    storage_log("CHARS fail: no write/notify pair");
     client->disconnect();
     connecting = false;
     setStatus(ElmStatus::Idle);
     needScanRestart = true;
+    noteTargetFailure();
     return;
   }
-  storage_save_last_elm(pendingAddr);
   connecting = false;
+  // Адрес сохраняется только после подтверждённого 0100 (см. handleInit).
   startInit();
 }
 
@@ -391,6 +506,7 @@ bool connectToAdv() {
 
   NimBLEAddress addr = advDevice->getAddress();
   pendingAddr = String(addr.toString().c_str());
+  storage_log("CONNECT start addr=%s", pendingAddr.c_str());
   client = NimBLEDevice::getClientByPeerAddress(addr);
   if (!client) client = NimBLEDevice::getDisconnectedClient();
   if (!client) {
@@ -401,8 +517,12 @@ bool connectToAdv() {
     }
     client = NimBLEDevice::createClient();
     client->setClientCallbacks(&clientCB, false);
-    client->setConnectionParams(12, 12, 0, 51);
-    client->setConnectTimeout(3);
+    // 24..40 = 30..50 мс, supervision timeout 200 = 2 с: надёжнее для клонов,
+    // чем прежние 15 мс / 510 мс.
+    client->setConnectionParams(24, 40, 0, 200);
+    // Внимание: аргумент — МИЛЛИСЕКУНДЫ. Прежнее значение 3 означало 3 мс,
+    // из-за чего попытка подключения обрывалась почти сразу.
+    client->setConnectTimeout(5000);
   }
 
   if (!client->isConnected()) {
@@ -410,9 +530,11 @@ bool connectToAdv() {
     // остановить главный цикл на секунды и заморозить UI.
     if (!client->connect(addr, true, true, true)) {
       SD_LOGln("[ELM] connect failed");
+      storage_log("CONNECT rejected by NimBLE addr=%s", pendingAddr.c_str());
       connecting = false;
       setStatus(ElmStatus::Idle);
       needScanRestart = true;
+      noteTargetFailure();
       return false;
     }
     connectStartedAt = millis();
@@ -427,10 +549,15 @@ bool connectToAdv() {
 // предыдущего ответа — отправка и приём используют одну переменную.
 void handlePoll() {
   if (!connected || initState != INIT_DONE) return;
+  static const char* cmds[] = {"010C", "010D", "0105", "ATRV"};
   uint32_t now = millis();
   if (cmdState == CMD_WAIT) {
     String resp;
     if (!readCmdResult(resp)) return;
+    if (pollLogBudget > 0) {
+      storage_log("POLL %s -> %s", cmds[cmdPidStep % 4], resp.c_str());
+      pollLogBudget--;
+    }
     std::vector<int> bytes;
     switch (cmdPidStep % 4) {
       case 0:
@@ -468,7 +595,6 @@ void handlePoll() {
   }
 
   if (now - lastPoll < POLL_GAP_MS) return;
-  const char* cmds[] = {"010C", "010D", "0105", "ATRV"};
   uint32_t tmos[] = {900, 900, 900, 900};
   uint8_t s = cmdPidStep % 4;
   if (!sendCmdAsync(cmds[s], tmos[s])) {
@@ -502,8 +628,11 @@ void elm_init() {
 // и попросить рабочую задачу начать новое 4-секундное сканирование.
 // Здесь не вызывается ни один радио-API.
 void elm_start_scan() {
-  if (client && client->isConnected()) client->disconnect();
+  storage_log("SCAN start target=%s", targetAddr.length() ? targetAddr.c_str() : "any");
+  // Сначала сбрасываем цель, чтобы колбэк onDisconnect не посчитал это
+  // неудачей подключения к сохранённому MAC.
   targetAddr = "";
+  targetFailCount = 0;
   doConnect = false;
   connected = false;
   connecting = false;
@@ -515,6 +644,7 @@ void elm_start_scan() {
   needScanRestart = false;
   clearFound();
   setStatus(ElmStatus::Scanning);
+  if (client && client->isConnected()) client->disconnect();
   SD_LOGln("[ELM] scan start");
   requestScanStart = true;  // блокирующий start() выполняет BLE-задача
 }
@@ -522,6 +652,7 @@ void elm_start_scan() {
 // Стартовый путь: искать сохранённый в NVS MAC и подключиться к нему.
 void elm_connect_saved(const String& addr) {
   targetAddr = addr;
+  targetFailCount = 0;
   doConnect = false;
   connected = false;
   connecting = false;
@@ -533,18 +664,20 @@ void elm_connect_saved(const String& addr) {
   clearFound();
   setStatus(ElmStatus::Scanning);
   SD_LOG("[ELM] scan for %s\n", addr.c_str());
+  storage_log("AUTO target=%s", addr.c_str());
   requestScanStart = true;
 }
 
-// Пользовательский путь: тап по строке на экране ELM сразу сохраняет адрес и
-// перезапускает поиск с этим MAC в качестве цели.
+// Пользовательский путь: тап по строке на экране ELM перезапускает поиск с этим
+// MAC в качестве цели. В NVS адрес попадёт только после успешной инициализации.
 void elm_connect(const String& addr) {
   targetAddr = addr;
-  storage_save_last_elm(addr);
+  targetFailCount = 0;
   doConnect = false;
   needScanRestart = false;
   setStatus(ElmStatus::Scanning);
   SD_LOG("[ELM] connect to %s\n", addr.c_str());
+  storage_log("TAP target=%s", addr.c_str());
   requestScanStart = true;
 }
 
@@ -566,22 +699,27 @@ void elm_loop() {
   if (connecting && client) {
     if (client->isConnected()) {
       SD_LOGln("[ELM] async connect done");
+      storage_log("GATT connected addr=%s", pendingAddr.c_str());
       finishConnect();
     } else if (millis() - connectStartedAt > CONNECT_TIMEOUT_MS) {
       SD_LOGln("[ELM] async connect timeout");
+      storage_log("CONNECT timeout addr=%s", pendingAddr.c_str());
       client->cancelConnect();
       connecting = false;
       setStatus(ElmStatus::Idle);
       needScanRestart = true;
+      noteTargetFailure();
     }
   }
 
   if (initState != INIT_IDLE && initState != INIT_DONE && initState != INIT_FAIL) {
     handleInit();
     if (initState == INIT_FAIL) {
+      storage_log("INIT fail addr=%s", pendingAddr.c_str());
       if (client && client->isConnected()) client->disconnect();
       setStatus(ElmStatus::Idle);
       needScanRestart = true;
+      noteTargetFailure();
     }
   }
 
