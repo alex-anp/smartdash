@@ -28,7 +28,7 @@
 - [x] BLE scan/connect + AT init implemented in `src/elm327.cpp`
 - [x] OBD polling: `010C`, `010D`, `0105`, `ATRV`
 - [x] One-shot startup sweep, no endless demo
-- [x] Swipe up/down and BOOT button cycle Dash -> ELM Connect -> Drag
+- [x] Swipe up opens ELM Connect, swipe down closes it, left/right toggles Dash <-> Drag
 - [x] NVS storage for last connected ELM MAC and drag results
 - [x] Persistent ELM connection log in LittleFS (`log`, `log all`, `clear` over USB)
 - [x] Drag screen: idle wait, launch detection, 10 km/h splits, demo ramp, last/best result

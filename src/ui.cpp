@@ -67,25 +67,13 @@ bool sweep_done = false;
 
 enum class Screen { Dash, ElmConnect, Drag };
 Screen screen = Screen::Dash;
+Screen elmReturnScreen = Screen::Dash;  // куда вернуться при свайпе вниз с ELM
 
-// Порядок экранов для свайпов: вверх — вперёд, вниз — назад.
-// Старое поведение сохранено: со смартборда свайп вверх всё ещё открывает ELM.
-const Screen screenOrder[] = {Screen::Dash, Screen::ElmConnect, Screen::Drag};
-constexpr int SCREEN_COUNT = sizeof(screenOrder) / sizeof(screenOrder[0]);
-
-int screenIndex(Screen s) {
-  for (int i = 0; i < SCREEN_COUNT; i++) {
-    if (screenOrder[i] == s) return i;
-  }
-  return 0;
-}
-
-Screen nextScreen(Screen s, int dir) {
-  int i = screenIndex(s) + dir;
-  if (i < 0) i = SCREEN_COUNT - 1;
-  if (i >= SCREEN_COUNT) i = 0;
-  return screenOrder[i];
-}
+// Навигация разделена по осям:
+//   свайп вверх    — открыть ELM Connect (из любого основного экрана);
+//   свайп вниз     — закрыть ELM Connect и вернуться на предыдущий экран;
+//   свайп влево/вправо — переключить Основной ↔ Замер разгона.
+Screen otherMainScreen(Screen s) { return s == Screen::Drag ? Screen::Dash : Screen::Drag; }
 
 void switchScreen(Screen next);  // определено ниже, после draw_* и saveDragResult
 
@@ -437,8 +425,9 @@ void draw_elm_screen() {
 
   d.setTextDatum(middle_center);
   d.setTextColor(0x8410, TFT_BLACK);
-  d.drawString(st == ElmStatus::Connected ? "Swipe down to return" : "Tap device to connect",
-               SCREEN_CENTER_X, 310, 2);
+  d.drawString(st == ElmStatus::Connected ? "ELM connected" : "Tap device to connect",
+               SCREEN_CENTER_X, 308, 1);
+  d.drawString("SWIPE DOWN - BACK", SCREEN_CENTER_X, 322, 1);
 
   flush();
 }
@@ -542,7 +531,8 @@ void draw_drag_screen() {
 
   d.setTextDatum(middle_center);
   d.setTextColor(0x8410, TFT_BLACK);
-  d.drawString("SWIPE / BTN - EXIT", SCREEN_CENTER_X, 322, 1);
+  d.drawString("SWIPE L/R - DASH", SCREEN_CENTER_X, 310, 1);
+  d.drawString("SWIPE UP - ELM", SCREEN_CENTER_X, 322, 1);
   flush();
 }
 
@@ -584,8 +574,8 @@ void handle_tap(int32_t x, int32_t y) {
   }
 }
 
-// Опрос CST816S. Вертикальный свайп >=60 px за 1 с переключает экраны;
-// проверка adx не даёт принять диагональное движение за свайп.
+// Опрос CST816S. Свайп >=60 px за 1 с: по вертикали открываем/закрываем ELM,
+// по горизонтали переключаем Основной ↔ Замер. Диагональные движения игнорируются.
 void poll_touch() {
   int32_t x = 0, y = 0;
   uint_fast8_t count = display_get().getTouch(&x, &y);
@@ -609,13 +599,25 @@ void poll_touch() {
       int32_t adx = dx < 0 ? -dx : dx;
       int32_t ady = dy < 0 ? -dy : dy;
       uint32_t now = millis();
-      if (now - touch.startedAt < 1000 && ady >= 60 && ady > adx * 2 &&
-          now - touch.lastClick > 150) {
-        touch.swipeHandled = true;
-        touch.lastClick = now;
-        Screen next = nextScreen(screen, dy < 0 ? +1 : -1);
-        SD_LOGln("[UI] swipe -> screen %d", (int)next);
-        switchScreen(next);
+      if (now - touch.startedAt < 1000 && now - touch.lastClick > 150) {
+        Screen target = screen;
+        bool vertical = ady >= 60 && ady > adx * 2;
+        bool horizontal = adx >= 60 && adx > ady * 2 && screen != Screen::ElmConnect;
+
+        if (vertical && dy < 0 && screen != Screen::ElmConnect) {
+          target = Screen::ElmConnect;
+        } else if (vertical && dy > 0 && screen == Screen::ElmConnect) {
+          target = elmReturnScreen;
+        } else if (horizontal) {
+          target = otherMainScreen(screen);
+        }
+
+        if (target != screen) {
+          touch.swipeHandled = true;
+          touch.lastClick = now;
+          SD_LOG("[UI] swipe %d,%d -> screen %d\n", (int)dx, (int)dy, (int)target);
+          switchScreen(target);
+        }
       }
     }
     return;
@@ -639,15 +641,16 @@ void poll_touch() {
   }
 }
 
-// Пин BOOT — резервная кнопка навигации (активный низкий уровень, INPUT_PULLUP).
-// Использует тот же интервал подавления дребезга, что и тач, чтобы не было двойных событий.
+// Пин BOOT — резервная кнопка: с ELM уходит на дашборд, иначе переключает
+// Основной ↔ Замер, как горизонтальный свайп.
 void poll_button() {
   static bool last = true;
   bool level = digitalRead(BTN_PIN) == LOW;
   if (level && !last && millis() - touch.lastClick > 250) {
     touch.lastClick = millis();
     SD_LOGln("[UI] button press");
-    switchScreen(nextScreen(screen, +1));
+    Screen target = screen == Screen::ElmConnect ? Screen::Dash : otherMainScreen(screen);
+    switchScreen(target);
   }
   last = level;
 }
@@ -657,6 +660,7 @@ void poll_button() {
 void switchScreen(Screen next) {
   if (screen == next) return;
   Screen prev = screen;
+  if (next == Screen::ElmConnect && prev != Screen::ElmConnect) elmReturnScreen = prev;
   screen = next;
 
   if (prev == Screen::Drag) {
