@@ -23,6 +23,7 @@
 #include "display.h"
 #include "dragrace.h"
 #include "elm327.h"
+#include "font_euro_digits.h"
 #include "perf.h"
 #include "settings.h"
 #include "sim.h"
@@ -46,9 +47,12 @@ constexpr int RPM_SCALE_R_OUT = 150;
 constexpr int RPM_SCALE_R_IN = 138;
 constexpr int RPM_SCALE_TICK_PX = 2;
 constexpr int RPM_SCALE_LABEL_R = 122;
+constexpr uint16_t RPM_SCALE_COLOR = 0x8044;  // #820826, тёмно-красная шкала с рисками
 
 // Блок скорости. "km/h" рисуется один раз в статике; при изменении значения
 // перекрашиваем только прямоугольник цифр, а не всю центральную область.
+// Оба разряда (десятки и единицы) существуют всегда: у значений 0..9 старший
+// разряд остаётся погашенным, но его сегменты видны как часть индикатора.
 constexpr int SPEED_DIGIT_W = 56;
 constexpr int SPEED_DIGIT_H = 96;
 constexpr int SPEED_SEG_T = 10;
@@ -317,7 +321,7 @@ void draw_rpm_scale() {
   //
   // Тонкая опорная дуга внутри дуги индикатора.
   d.fillArc(SCREEN_CENTER_X, SCREEN_CENTER_Y, RPM_SCALE_R_OUT, RPM_SCALE_R_OUT - 1,
-            RPM_ARC_START, RPM_ARC_START + RPM_ARC_SWEEP, 0x4208);
+            RPM_ARC_START, RPM_ARC_START + RPM_ARC_SWEEP, RPM_SCALE_COLOR);
 
   // Одна тонкая риска на каждые 1000 об/мин, полностью отделена от внешней дуги.
   for (int rpm = 0; rpm <= gSettings.rpmMax; rpm += 1000) {
@@ -333,7 +337,7 @@ void draw_rpm_scale() {
     for (int off = -half; off < RPM_SCALE_TICK_PX - half; off++) {
       int ox = (int)(nx * off);
       int oy = (int)(ny * off);
-      d.drawLine(x1 + ox, y1 + oy, x2 + ox, y2 + oy, 0x8410);
+      d.drawLine(x1 + ox, y1 + oy, x2 + ox, y2 + oy, RPM_SCALE_COLOR);
     }
   }
 
@@ -346,7 +350,7 @@ void draw_rpm_scale() {
     int y = SCREEN_CENTER_Y + (int)(sinf(a) * RPM_SCALE_LABEL_R);
     char buf[4];
     snprintf(buf, sizeof(buf), "%d", k);
-    d.drawString(buf, x, y, 4);
+    d.drawString(buf, x, y, &EURO_Digits);
   }
 }
 
@@ -419,8 +423,8 @@ void draw_seg_digit(lgfx::LGFX_Device& d, int x, int y, int w, int h, int t, int
 }
 
 // Блок скорости. Подпись "km/h" рисуется один раз в draw_static(), поэтому здесь
-// перекрашивается только прямоугольник цифр. Значения 0..9 намеренно рисуются
-// одной цифрой по центру.
+// перекрашивается только прямоугольник цифр. Оба разряда рисуются всегда: у значений
+// 0..9 десяткам передаётся -1 — все сегменты гасятся, но индикатор остаётся видимым.
 void draw_speed(int speed) {
   auto& d = g();
   speed = constrain(speed, 0, 99);
@@ -436,16 +440,10 @@ void draw_speed(int speed) {
   const int d1 = speed / 10;
   const int d2 = speed % 10;
 
-  if (d1 == 0) {
-    // Оставляем 0..9 (особенно ноль после анимации) явно по центру, а не с
-    // пустым разрядом десятков и смещённой влево единственной цифрой.
-    draw_seg_digit(d, SCREEN_CENTER_X - SPEED_DIGIT_W / 2, SPEED_Y0, SPEED_DIGIT_W,
-                   SPEED_DIGIT_H, SPEED_SEG_T, d2, on, off);
-  } else {
-    draw_seg_digit(d, x0, SPEED_Y0, SPEED_DIGIT_W, SPEED_DIGIT_H, SPEED_SEG_T, d1, on, off);
-    draw_seg_digit(d, x0 + SPEED_DIGIT_W + SPEED_SPACING, SPEED_Y0, SPEED_DIGIT_W,
-                   SPEED_DIGIT_H, SPEED_SEG_T, d2, on, off);
-  }
+  draw_seg_digit(d, x0, SPEED_Y0, SPEED_DIGIT_W, SPEED_DIGIT_H, SPEED_SEG_T,
+                 d1 == 0 ? -1 : d1, on, off);
+  draw_seg_digit(d, x0 + SPEED_DIGIT_W + SPEED_SPACING, SPEED_Y0, SPEED_DIGIT_W,
+                 SPEED_DIGIT_H, SPEED_SEG_T, d2, on, off);
 }
 
 // Маленькие контурные иконки рядом с числами в нижней части циферблата.
@@ -526,9 +524,13 @@ void draw_static() {
   d.drawCircle(SCREEN_CENTER_X, SCREEN_CENTER_Y, 179, 0x1082);
   draw_arc_bg();
   draw_rpm_scale();
-  d.setTextDatum(middle_center);
+  // Подпись скорости тем же шрифтом, что и статус ELM (Font2, без масштабирования).
+  // Правый край совпадает с правым краем второго (младшего) разряда.
+  const int speedRight = SCREEN_CENTER_X + (SPEED_DIGIT_W * 2 + SPEED_SPACING) / 2;
+  d.setTextDatum(middle_right);
   d.setTextColor(0xC618, TFT_BLACK);
-  d.drawString("km/h", SCREEN_CENTER_X, SPEED_Y0 + SPEED_DIGIT_H + 18, 4);
+  d.drawString("km/h", speedRight, SPEED_Y0 + SPEED_DIGIT_H + 18, 2);
+  d.setTextDatum(middle_center);
 
   // После полной перерисовки кэш виджетов недействителен: RPM рисуем целиком,
   // остальные — обычным сравнением с sentinel-значениями.
