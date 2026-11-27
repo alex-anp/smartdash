@@ -31,15 +31,23 @@
   `010C`/`010D`/`0105`/`ATRV` if multi-PID is unsupported
 - [x] Display update: incremental RPM arc and dirty-rectangle sprite pushes instead of full-frame flush
 - [x] One-shot startup sweep, no endless demo
-- [x] Swipe up from Dash opens ELM Monitor, swipe down closes it, left/right toggles Dash <-> Drag; vertical swipes are ignored on Drag
+- [x] Navigation: from Dash swipe up opens ELM Monitor, swipe down opens read-only Settings; swipe down on ELM and swipe up on Settings go back; left/right toggles Dash <-> Drag; vertical swipes ignored on Drag
 - [x] ELM Monitor shows scan results while searching/connecting, and connected adapter
   info (name, address, address type, protocol, RSSI, uptime) once AT init is done;
   opening the screen does not start a scan, `Scan` button does
 - [x] NVS storage for last connected ELM MAC, address type, name and drag results
 - [x] Persistent ELM connection log in LittleFS (`log`, `log all`, `clear` over USB)
 - [x] Drag screen: idle wait, speed-based launch, 10 km/h splits, demo ramp, per-target best, raw sample log
-- [x] Wi-Fi AP started; HTTP root is still a placeholder
-- [ ] Full web config forms (RPM limits, units, colors)
+- [x] Wi-Fi AP with a shared page style: root with SETTINGS / ELM LOG buttons, mobile-friendly
+  config form at `/settings` (POST + PRG redirect), separate log page at `/log` with text
+  endpoint `/elm-log`. Catch-all DNS + probing redirects form a captive portal that opens
+  the root page on connect
+- [x] WEB button on the Settings screen starts/stops AP, DNS and HTTP; `web_set_enabled()`
+  saves `cfg_web_enabled` and restores it on boot (default off, radio down when off)
+- [x] Values persisted in NVS: RPM max/redline, coolant/voltage thresholds, boot animation
+  toggle, model name (defaults in `config.h`, inventory in `docs/SETTINGS.md`).
+  On-device Settings is read-only; web saves call `ui_settings_changed()` to force a full redraw
+- [ ] Remaining settings (units, zone colors, Drag/ELM parameters)
 - [x] Test with a real ELM327: connection, AT init and data reception confirmed
 - [x] `010C0D` multi-PID support used with automatic legacy fallback
 
@@ -66,6 +74,8 @@
 - Inner scale: ticks every 1000 rpm, labels every 2000 rpm, radii 138..150
 - Speed: 0..99 seven-segment digits; 0..9 uses one centered digit
 - Bottom: coolant color thresholds <60 / 60..90 / >90, voltage <11 / 11..12 / 12..15 / >15
+  (defaults; editable in the web form at `/settings`)
+
 - ELM status: three blinking dots while searching, `ELM OK` when connected
 - ELM Monitor screen: scan list before connection; connected-adapter details after
   `ELM CONNECTED` (refreshed every 600 ms, so uptime ticks)
@@ -80,5 +90,11 @@
 
 - Power: Type-C (DC/DC 12 V -> 5 V on the bike)
 - BT to ELM327 over BLE, auto-connect to last saved MAC
-- Config via built-in Wi-Fi AP `SmartDash-<id>` / `smartdash` (http://192.168.4.1)
-- UI: minimal 4 params on round display
+- Wi-Fi AP `SmartDash-<id>` / `smartdash` (http://192.168.4.1) serves the root page with
+  SETTINGS / ELM LOG buttons, the config form at `/settings` and the log page at `/log`
+  (text at `/elm-log`); `DNSServer` in catch-all mode plus redirects for `/generate_204`,
+  `/hotspot-detect.html`, `/connecttest.txt` and `onNotFound` make a captive portal, so a
+  phone opens the root page right after joining the AP. The AP is off by default and is
+  toggled by the WEB button on the Settings screen (`cfg_web_enabled`).
+  Defaults are in `config.h`, saved values in `cfg_*` NVS keys.
+- UI: navigation gestures and the WEB toggle; config fields are edited from a phone

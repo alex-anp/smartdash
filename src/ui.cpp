@@ -23,8 +23,10 @@
 #include "display.h"
 #include "dragrace.h"
 #include "elm327.h"
+#include "settings.h"
 #include "sim.h"
 #include "storage.h"
+#include "web.h"
 
 namespace {
 
@@ -100,14 +102,15 @@ uint32_t last_sweep_ms = 0;
 int sweep_step = 0;
 bool sweep_done = false;
 
-enum class Screen { Dash, ElmConnect, Drag };
+enum class Screen { Dash, ElmConnect, Drag, Settings };
 Screen screen = Screen::Dash;
 Screen elmReturnScreen = Screen::Dash;  // куда вернуться при свайпе вниз с ELM
 
-// Навигация разделена по осям:
-//   свайп вверх    — открыть ELM Monitor только с Dash;
-//   свайп вниз     — закрыть ELM Monitor и вернуться на предыдущий экран;
-//   свайп влево/вправо — переключить Основной ↔ Замер разгона.
+// Навигация разделена по осям и по текущему экрану (экраны ELM/Settings — модальные):
+//   с Dash: вверх — ELM Monitor, вниз — Settings, влево/вправо — Drag;
+//   с ELM Monitor: вниз — вернуться туда, откуда пришли;
+//   с Settings: вверх — вернуться на Dash;
+//   на Drag вертикальные свайпы игнорируются, чтобы не прервать замер.
 Screen otherMainScreen(Screen s) { return s == Screen::Drag ? Screen::Dash : Screen::Drag; }
 
 void switchScreen(Screen next);  // определено ниже, после draw_* и saveDragResult
@@ -143,10 +146,17 @@ struct TouchInput {
 };
 TouchInput touch;
 
-// Линейное преобразование RPM в угол с ограничением по RPM_MAX.
+// Экран Settings только показывает значения: редактирование перенесено в веб.
+// web_loop() выставляет флаг, ui_loop() инвалидирует кэши и перерисовывает экран.
+enum class SettingId : uint8_t {
+  RpmMax, Redline, CoolLo, CoolHi, VoltLo, VoltMid, VoltHi, Anim, Model, Count
+};
+bool settingsRedrawPending = false;
+
+// Линейное преобразование RPM в угол с ограничением по текущей шкале.
 float rpm_angle(int rpm) {
-  rpm = constrain(rpm, 0, RPM_MAX);
-  return RPM_ARC_START + RPM_ARC_SWEEP * ((float)rpm / (float)RPM_MAX);
+  rpm = constrain(rpm, 0, gSettings.rpmMax);
+  return RPM_ARC_START + RPM_ARC_SWEEP * ((float)rpm / (float)gSettings.rpmMax);
 }
 
 // Цель отрисовки: спрайт, если он создан; иначе панель напрямую.
@@ -288,7 +298,7 @@ void draw_rpm_scale() {
             RPM_ARC_START, RPM_ARC_START + RPM_ARC_SWEEP, 0x4208);
 
   // Одна тонкая риска на каждые 1000 об/мин, полностью отделена от внешней дуги.
-  for (int rpm = 0; rpm <= RPM_MAX; rpm += 1000) {
+  for (int rpm = 0; rpm <= gSettings.rpmMax; rpm += 1000) {
     float a = rpm_angle(rpm) * (float)M_PI / 180.0f;
     float ca = cosf(a), sa = sinf(a);
     float nx = -sa, ny = ca;
@@ -308,7 +318,7 @@ void draw_rpm_scale() {
   // Цифры каждые 2000 об/мин (в тысячах).
   d.setTextDatum(middle_center);
   d.setTextColor(TFT_WHITE, TFT_BLACK);
-  for (int k = 0; k <= RPM_MAX / 1000; k += 2) {
+  for (int k = 0; k <= gSettings.rpmMax / 1000; k += 2) {
     float a = rpm_angle(k * 1000) * (float)M_PI / 180.0f;
     int x = SCREEN_CENTER_X + (int)(cosf(a) * RPM_SCALE_LABEL_R);
     int y = SCREEN_CENTER_Y + (int)(sinf(a) * RPM_SCALE_LABEL_R);
@@ -318,19 +328,14 @@ void draw_rpm_scale() {
   }
 }
 
-// Внешние зоны индикатора. Цвета из config.h: зелёный до красной зоны,
-// оранжевый до 10k, красный до 12k.
+// Внешние зоны индикатора. Границы берутся из настроек: красная зона начинается
+// через SETTINGS_RPM_ZONE_SPAN об/мин после redline.
 struct RpmZone { int from; int to; uint16_t color; };
-static const RpmZone rpmZones[] = {
-  {0, RPM_REDLINE, TFT_GREEN},
-  {RPM_REDLINE, RPM_REDLINE + 2000, TFT_ORANGE},
-  {RPM_REDLINE + 2000, RPM_MAX, TFT_RED},
-};
 
 // Залить один интервал дуги и пометить только его границы как грязные.
 void fillArcRange(int rpmFrom, int rpmTo, uint16_t color) {
-  rpmFrom = constrain(rpmFrom, 0, RPM_MAX);
-  rpmTo = constrain(rpmTo, 0, RPM_MAX);
+  rpmFrom = constrain(rpmFrom, 0, gSettings.rpmMax);
+  rpmTo = constrain(rpmTo, 0, gSettings.rpmMax);
   if (rpmFrom >= rpmTo) return;
   const float a0 = rpm_angle(rpmFrom);
   const float a1 = rpm_angle(rpmTo);
@@ -338,9 +343,16 @@ void fillArcRange(int rpmFrom, int rpmTo, uint16_t color) {
   markArcDirty(a0, a1);
 }
 
-// Цветной участок [from, to] с разбивкой по зонам.
+// Цветной участок [from, to] с разбивкой по зонам. Зоны считаются от текущих
+// настроек, поэтому после их изменения статику нужно перерисовать целиком.
 void drawRpmColorRange(int from, int to) {
-  for (const auto& z : rpmZones) {
+  const int mid = min(gSettings.rpmRedline + SETTINGS_RPM_ZONE_SPAN, gSettings.rpmMax);
+  const RpmZone zones[] = {
+      {0, gSettings.rpmRedline, TFT_GREEN},
+      {gSettings.rpmRedline, mid, TFT_ORANGE},
+      {mid, gSettings.rpmMax, TFT_RED},
+  };
+  for (const auto& z : zones) {
     const int a = max(from, z.from);
     const int b = min(to, z.to);
     if (a < b) fillArcRange(a, b, z.color);
@@ -349,7 +361,7 @@ void drawRpmColorRange(int from, int to) {
 
 // Полная перерисовка дуги (после смены экрана/статики).
 void draw_rpm(int rpm) {
-  rpm = constrain(rpm, 0, RPM_MAX);
+  rpm = constrain(rpm, 0, gSettings.rpmMax);
   draw_arc_bg();
   drawRpmColorRange(0, rpm);
 }
@@ -358,8 +370,8 @@ void draw_rpm(int rpm) {
 // при падении — стираем только убранный. Вместо ~(352×264) пикселей обычно
 // перерисовываются единицы градусов дуги.
 void update_rpm(int oldRpm, int newRpm) {
-  oldRpm = constrain(oldRpm, 0, RPM_MAX);
-  newRpm = constrain(newRpm, 0, RPM_MAX);
+  oldRpm = constrain(oldRpm, 0, gSettings.rpmMax);
+  newRpm = constrain(newRpm, 0, gSettings.rpmMax);
   if (newRpm == oldRpm) return;
   if (newRpm < oldRpm) fillArcRange(newRpm, oldRpm, RPM_ARC_BG_COLOR);
   else drawRpmColorRange(oldRpm, newRpm);
@@ -442,16 +454,16 @@ void draw_bottom(int coolant_c, float volt, bool connected) {
   addDirtyRect(BOTTOM_X, BOTTOM_Y, BOTTOM_W, BOTTOM_H);
   uint16_t tColor = 0xC618;
   if (coolant_c >= 0) {
-    if (coolant_c < 60) tColor = TFT_CYAN;
-    else if (coolant_c <= 90) tColor = TFT_GREEN;
+    if (coolant_c < gSettings.coolantLow) tColor = TFT_CYAN;
+    else if (coolant_c <= gSettings.coolantHigh) tColor = TFT_GREEN;
     else tColor = TFT_RED;
   }
 
   uint16_t vColor = 0xC618;
   if (volt > 0.1f) {
-    if (volt < 11.0f) vColor = TFT_RED;
-    else if (volt < 12.0f) vColor = TFT_ORANGE;
-    else if (volt <= 15.0f) vColor = TFT_GREEN;
+    if (volt < gSettings.voltLow) vColor = TFT_RED;
+    else if (volt < gSettings.voltMid) vColor = TFT_ORANGE;
+    else if (volt <= gSettings.voltHigh) vColor = TFT_GREEN;
     else vColor = TFT_RED;
   }
 
@@ -761,11 +773,92 @@ void draw_drag_screen() {
   flush();
 }
 
-// Тап-зоны только на экране ELM. На дашборде и на экране замера тапы
-// игнорируются: навигация свайпом, цель замера теперь не выбирается вручную.
-void handle_tap(int32_t x, int32_t y) {
-  if (screen == Screen::Dash || screen == Screen::Drag) return;
+// --- Экран настроек -------------------------------------------------------
+// Read-only список: подписи и текущие значения тех же полей, что и в веб-форме.
+// Напряжение хранится в settings.cpp в десятых долях вольта.
 
+const char* settingLabel(SettingId id) {
+  switch (id) {
+    case SettingId::RpmMax:  return "RPM MAX";
+    case SettingId::Redline: return "REDLINE";
+    case SettingId::CoolLo:  return "COOL LOW";
+    case SettingId::CoolHi:  return "COOL HIGH";
+    case SettingId::VoltLo:  return "VOLT LOW";
+    case SettingId::VoltMid: return "VOLT MID";
+    case SettingId::VoltHi:  return "VOLT HIGH";
+    case SettingId::Anim:    return "BOOT ANIM";
+    case SettingId::Model:   return "MODEL";
+    default:                 return "";
+  }
+}
+
+String settingValue(SettingId id) {
+  switch (id) {
+    case SettingId::RpmMax:  return String(gSettings.rpmMax);
+    case SettingId::Redline: return String(gSettings.rpmRedline);
+    case SettingId::CoolLo:  return String(gSettings.coolantLow) + "C";
+    case SettingId::CoolHi:  return String(gSettings.coolantHigh) + "C";
+    case SettingId::VoltLo:  return String(gSettings.voltLow, 1) + "V";
+    case SettingId::VoltMid: return String(gSettings.voltMid, 1) + "V";
+    case SettingId::VoltHi:  return String(gSettings.voltHigh, 1) + "V";
+    case SettingId::Anim:    return gSettings.bootAnim ? String("ON") : String("OFF");
+    case SettingId::Model:   return String(gSettings.model);
+    default:                 return String();
+  }
+}
+
+// Read-only список текущих значений плюс кнопка включения веба. Править поля
+// надо с телефона; радио включается только по тапу и сохраняется в NVS.
+void draw_settings_screen() {
+  auto& d = g();
+  const bool webOn = web_is_enabled();
+  d.fillScreen(TFT_BLACK);
+  d.setTextDatum(middle_center);
+
+  d.setTextColor(TFT_WHITE, TFT_BLACK);
+  d.drawString("SETTINGS", SCREEN_CENTER_X, 34, 2);
+  d.setTextColor(0x8410, TFT_BLACK);
+  d.drawString(webOn ? web_ap_ssid().c_str() : "WEB DISABLED", SCREEN_CENTER_X, 56, 1);
+  d.drawFastHLine(40, 68, 280, 0x2104);
+
+  for (int i = 0; i < (int)SettingId::Count; i++) {
+    SettingId id = (SettingId)i;
+    const int y = 78 + i * 22;
+    d.fillRoundRect(58, y, 244, 20, 4, TFT_BLACK);
+
+    d.setTextDatum(middle_left);
+    d.setTextColor(0xC618, TFT_BLACK);
+    d.drawString(settingLabel(id), 68, y + 10, 1);
+
+    d.setTextDatum(middle_right);
+    d.setTextColor(TFT_WHITE, TFT_BLACK);
+    // Модель длиннее остальных значений — для неё мелкий шрифт.
+    d.drawString(settingValue(id), 292, y + 10, id == SettingId::Model ? 1 : 2);
+  }
+
+  d.drawFastHLine(40, 282, 280, 0x2104);
+  const uint16_t btnBg = webOn ? 0x0420 : 0x4208;
+  d.fillRoundRect(58, 290, 244, 30, 6, btnBg);
+  d.setTextDatum(middle_center);
+  d.setTextColor(webOn ? TFT_GREEN : TFT_BLACK, btnBg);
+  d.drawString(webOn ? "WEB ON - TAP TO DISABLE" : "WEB OFF - TAP TO ENABLE",
+               SCREEN_CENTER_X, 305, 1);
+
+  d.setTextColor(0x8410, TFT_BLACK);
+  d.drawString("SWIPE UP - BACK", SCREEN_CENTER_X, 340, 1);
+  flush();
+}
+
+// Тап-зоны: на ELM — Scan/список, на Settings — только кнопка WEB.
+// Дашборд и замер тапы игнорируют: навигация свайпом.
+void handle_tap(int32_t x, int32_t y) {
+  if (screen == Screen::Settings) {
+    if (in_rect(x, y, 58, 290, 302, 320)) {
+      web_set_enabled(!web_is_enabled());
+      draw_settings_screen();
+    }
+    return;
+  }
   if (screen != Screen::ElmConnect) return;
 
   if (in_rect(x, y, 130, 94, 230, 122)) {
@@ -789,9 +882,11 @@ void handle_tap(int32_t x, int32_t y) {
   }
 }
 
-// Опрос CST816S. Свайп >=60 px за 1 с: вверх с Dash открываем ELM Monitor,
-// вниз с ELM Monitor возвращаемся назад, влево/вправо переключаем Dash ↔ Drag.
-// С экрана замера вертикальные свайпы игнорируются. Диагонали — тоже.
+// Опрос CST816S. Свайп >=60 px за 1 с:
+//   вверх с Dash — ELM Monitor, вниз с Dash — Settings;
+//   вниз с ELM Monitor и вверх с Settings — назад на Dash;
+//   влево/вправо — Dash ↔ Drag. С Drag вертикальные свайпы игнорируются.
+// Диагонали — тоже.
 void poll_touch() {
   int32_t x = 0, y = 0;
   uint_fast8_t count = display_get().getTouch(&x, &y);
@@ -818,14 +913,17 @@ void poll_touch() {
       if (now - touch.startedAt < 1000 && now - touch.lastClick > 150) {
         Screen target = screen;
         bool vertical = ady >= 60 && ady > adx * 2;
-        bool horizontal = adx >= 60 && adx > ady * 2 && screen != Screen::ElmConnect;
+        bool horizontal = adx >= 60 && adx > ady * 2 &&
+                          screen != Screen::ElmConnect && screen != Screen::Settings;
 
-        // ELM Monitor открывается только с главного экрана: на Drag свайп
-        // вверх не должен прерывать замер.
         if (vertical && dy < 0 && screen == Screen::Dash) {
           target = Screen::ElmConnect;
+        } else if (vertical && dy > 0 && screen == Screen::Dash) {
+          target = Screen::Settings;
         } else if (vertical && dy > 0 && screen == Screen::ElmConnect) {
           target = elmReturnScreen;
+        } else if (vertical && dy < 0 && screen == Screen::Settings) {
+          target = Screen::Dash;
         } else if (horizontal) {
           target = otherMainScreen(screen);
         }
@@ -859,15 +957,16 @@ void poll_touch() {
   }
 }
 
-// Пин BOOT — резервная кнопка: с ELM уходит на дашборд, иначе переключает
-// Основной ↔ Замер, как горизонтальный свайп.
+// Пин BOOT — резервная кнопка: с модального экрана (ELM/Settings) уходит
+// на дашборд, иначе переключает Основной ↔ Замер, как горизонтальный свайп.
 void poll_button() {
   static bool last = true;
   bool level = digitalRead(BTN_PIN) == LOW;
   if (level && !last && millis() - touch.lastClick > 250) {
     touch.lastClick = millis();
     SD_LOGln("[UI] button press");
-    Screen target = screen == Screen::ElmConnect ? Screen::Dash : otherMainScreen(screen);
+    bool modal = screen == Screen::ElmConnect || screen == Screen::Settings;
+    Screen target = modal ? Screen::Dash : otherMainScreen(screen);
     switchScreen(target);
   }
   last = level;
@@ -908,6 +1007,8 @@ void switchScreen(Screen next) {
     dragScreenDirty = true;
     lastDragState = drag_state();
     draw_drag_screen();
+  } else if (screen == Screen::Settings) {
+    draw_settings_screen();
   } else {
     ui_show_dash();
   }
@@ -943,7 +1044,16 @@ void ui_init() {
   needFullFlush = false;
   last_sweep_ms = millis();
   sweep_step = 0;
-  sweep_done = false;
+  sweep_done = !gSettings.bootAnim;
+  if (sweep_done) {
+    // Анимация отключена: сразу показываем нули, как после её завершения.
+    cur.rpm = 0;
+    cur.speed_kmh = 0;
+    cur.coolant_c = 0;
+    cur.volt = 0.0f;
+    cur.connected = false;
+  }
+  settingsRedrawPending = false;
 
   latest = {};
   haveLatest = false;
@@ -983,7 +1093,7 @@ void ui_show_boot() {
   d.setTextColor(TFT_GREEN, TFT_BLACK);
   d.drawString("SmartDash", SCREEN_CENTER_X, SCREEN_CENTER_Y - 10, 4);
   d.setTextColor(TFT_WHITE, TFT_BLACK);
-  d.drawString(VEHICLE_NAME, SCREEN_CENTER_X, SCREEN_CENTER_Y + 24, 2);
+  d.drawString(gSettings.model, SCREEN_CENTER_X, SCREEN_CENTER_Y + 24, 2);
   flush();
 }
 
@@ -1004,6 +1114,14 @@ void ui_show_elm_connect() { switchScreen(Screen::ElmConnect); }
 
 // Возврат на дашборд с принудительной перерисовкой спрайта.
 void ui_hide_elm_connect() { switchScreen(Screen::Dash); }
+
+// Settings — тот же модальный экран, открывается свайпом вниз с Dash.
+void ui_show_settings() { switchScreen(Screen::Settings); }
+void ui_hide_settings() { switchScreen(Screen::Dash); }
+
+// Веб-форма сохранила новые значения. Обработка идёт в ui_loop(), чтобы не
+// рисовать из обработчика HTTP и не гнать полный кадр на каждое поле формы.
+void ui_settings_changed() { settingsRedrawPending = true; }
 
 // Рендер по «грязным» виджетам. У каждого виджета своё сравнение с кэшем, чтобы
 // при изменении только напряжения или точки статуса не перерисовывать дугу RPM.
@@ -1040,6 +1158,27 @@ void ui_show_dash() {
 // отрисовывается активный. Данные от реального ELM сразу останавливают анимацию.
 void ui_loop() {
   uint32_t now = millis();
+
+  // Настройки пришли из веба: сбрасываем кэши виджетов и статики дашборда.
+  // Полный кадр нужен, потому что изменились риски/зоны дуги, а не только числа.
+  if (settingsRedrawPending) {
+    settingsRedrawPending = false;
+    static_drawn = false;
+    drawn.rpm = -999;
+    drawn.speed_kmh = -999;
+    drawn.coolant_c = -999;
+    drawn.volt = -999;
+    drawn.connected = !cur.connected;
+    drawn_dot_phase = -1;
+    dirty = true;
+    needFullFlush = true;
+    // Выключение анимации действует сразу, включение — после перезагрузки.
+    if (!gSettings.bootAnim) sweep_done = true;
+    if (screen == Screen::Settings) draw_settings_screen();
+    else if (screen == Screen::ElmConnect) elm_screen_dirty = true;
+    else if (screen == Screen::Drag) dragScreenDirty = true;
+  }
+
   // Тестовый режим имитирует подключённый адаптер: стартовая анимация
   // останавливается, индикатор "ELM OK" загорается как при реальном подключении.
   bool sim = sim_is_active();
@@ -1076,9 +1215,9 @@ void ui_loop() {
     int s = sweep_step;
     int half = SWEEP_STEPS / 2;
 
-    // RPM: 0 -> RPM_MAX -> 0.
-    cur.rpm = (s <= half) ? (RPM_MAX * s / half)
-                          : (RPM_MAX * (SWEEP_STEPS - s) / half);
+    // RPM: 0 -> текущий максимум шкалы -> 0.
+    cur.rpm = (s <= half) ? (gSettings.rpmMax * s / half)
+                          : (gSettings.rpmMax * (SWEEP_STEPS - s) / half);
     // Скорость: 99 -> 0.
     cur.speed_kmh = 99 * (SWEEP_STEPS - s) / SWEEP_STEPS;
     // Температура: 99 -> 0 шагами по 5 градусов.
@@ -1142,6 +1281,8 @@ void ui_loop() {
       elm_screen_dirty = false;
       draw_elm_screen();
     }
+  } else if (screen == Screen::Settings) {
+    // Заготовка статическая: draw_settings_screen() вызывается только при входе.
   } else {
     ui_show_dash();
   }

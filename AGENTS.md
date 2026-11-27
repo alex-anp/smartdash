@@ -9,7 +9,9 @@ ESP32-S3 прибор Honda Dunk AF78 на PlatformIO/Arduino. Один env: `jc
 - `pio` **не в PATH**. Использовать полный путь:
   - сборка: `~/.platformio/penv/bin/pio run -e jc3636w518c`
   - прошивка: `~/.platformio/penv/bin/pio run -e jc3636w518c -t upload`
-- Порт определяется автоматически (macOS: `/dev/cu.usbmodem*`).
+- Порт определяется автоматически (macOS: `/dev/cu.usbmodem*`, Linux: `/dev/ttyACM0`).
+  На Linux группа `dialout` есть в `/etc/group`, но в текущей сессии её может не быть:
+  при `Permission denied` прошивать через `sg dialout -c '~/.platformio/penv/bin/pio run -e jc3636w518c -t upload'`.
 - Тестов, CI, линтеров и task-runner нет (`test/` пуст). Проверка = успешная сборка;
   поведение на железе проверяется отдельной прошивкой.
 - Предупреждения LovyanGFX про deprecated `drawString` при сборке — ожидаемы, не ошибки.
@@ -33,11 +35,20 @@ ESP32-S3 прибор Honda Dunk AF78 на PlatformIO/Arduino. Один env: `jc
   включать только `-DSMARTDASH_SERIAL_DEBUG=1` в `build_flags`.
 - Постоянный журнал — LittleFS `/elm.log` + `/elm.prev.log`, ротация при 1 МБ,
   префикс строки `bN tS.mmm`. Пишется всегда, независимо от дебага.
-  Чтение: USB Serial `log` / `log all` / `clear`; HTTP `/elm-log`, `?all=1`, `?clear=1`.
+  Чтение: USB Serial `log` / `log all` / `clear`; HTTP-страница `/log` и текст
+  `/elm-log`, `?all=1`, `?clear=1` (после очистки — редирект на `/log?cleared=1`).
 - NVS namespace `smartdash`: `last_elm`, `last_elm_type`, `drag_last`,
-  `drag_best_60/80/100`. Старый общий `drag_best` переносится только при совпадении цели.
-- Пины и константы — только в `include/config.h`. Веб-интерфейс остаётся: сейчас `/` —
-  заглушка, AP уже отдаёт журнал; настройки пока правятся в `include/config.h`.
+  `drag_best_60/80/100`, плюс пользовательские `cfg_*` из `src/settings.cpp`
+  (включая `cfg_web_enabled` — состояние кнопки WEB, дефолт выключено).
+  Старый общий `drag_best` переносится только при совпадении цели.
+- Пины и константы — только в `include/config.h`. Веб AP в одном стиле отдаёт корень
+  `/` с кнопками SETTINGS / ELM LOG, форму `/settings` (POST + PRG-редирект) и страницу
+  журнала `/log` (текст — `/elm-log`); `DNSServer` в режиме catch-all плюс редирект
+  probing-путей дают captive portal — телефон сам открывает корень.
+  WEB поднимают/опускают кнопкой на экране Settings: `web_set_enabled()` останавливает
+  сервер, DNS и радио, состояние пишется в `cfg_web_enabled` и восстанавливается при
+  загрузке. Экран Settings показывает текущие значения и кнопку WEB, поля правит веб.
+  Дефолты — в `config.h`, сохранение — в NVS под `cfg_*`. Инвентарь — `docs/SETTINGS.md`.
 
 ## BLE/ELM: проверенные грабли
 
@@ -64,9 +75,12 @@ ESP32-S3 прибор Honda Dunk AF78 на PlatformIO/Arduino. Один env: `jc
 
 ## UI и замер разгона
 
-- Навигация по осям: свайп вверх — открыть ELM Monitor только с Dash, вниз — закрыть
-  к предыдущему экрану, влево/вправо — Dash↔Drag. На Drag вертикальные свайпы
-  игнорируются. BOOT переключает Dash/Drag и закрывает ELM.
+- Навигация по осям: с Dash свайп вверх — ELM Monitor, вниз — экран настроек;
+  с ELM вниз — назад, с настроек вверх — назад. Влево/вправо — Dash↔Drag.
+  На Drag вертикальные свайпы игнорируются. BOOT переключает Dash/Drag и
+  закрывает модальные экраны. Настройки редактируются только веб-формой в
+  `web_loop()` (та же UI-задача), пишутся в NVS и через `ui_settings_changed()`
+  заставляют `ui_loop()` перерисовать статику целиком; `elmTask` их не читает.
 - Дашборд обновляется инкрементально: дуга RPM заливается только в изменившемся
   интервале, на панель через `setClipRect()` + `pushSprite()` уходят только «грязные»
   прямоугольники. Полный кадр — только при смене экрана. Не вызывать `flush()` на

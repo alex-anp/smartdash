@@ -5,7 +5,7 @@
  * BT:      только BLE (у ESP32-S3 нет Bluetooth Classic)
  * ELM:     совместимый адаптер ELM327, автоподключение к последнему MAC
  * UI:      полноэкранный спрайт в PSRAM, одноразовая анимация, навигация свайпами
- * Настройки: Wi-Fi точка доступа (базовая страница, формы — в будущем)
+ * Настройки: веб-форма /settings в Wi-Fi AP; экран Settings — только просмотр
  *
  * setup() выполняется строго по порядку: NVS -> дисплей -> UI -> AP -> BLE.
  * loop() остаётся лёгким: блокирующая логика BLE живёт в задаче elmTask
@@ -18,6 +18,7 @@
 #include "display.h"
 #include "elm327.h"
 #include "ui.h"
+#include "settings.h"
 #include "storage.h"
 #include "web.h"
 
@@ -27,7 +28,8 @@ void setup() {
   Serial.begin(115200);
   delay(100);
 
-  storage_init();  // Открыть NVS до первого чтения сохранённого адреса ELM
+  storage_init();   // Открыть NVS до первого чтения сохранённого адреса ELM
+  settings_init();  // Загрузить настройки из того же NVS до отрисовки UI
   storage_log("BOOT");
   Serial.println("SmartDash: 'log', 'log all', 'clear', 'sim rpm=... spd=... coolant=... volt=...'");
   display_init();  // ST77916 + подсветка + CST816S
