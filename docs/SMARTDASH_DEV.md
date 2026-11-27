@@ -44,11 +44,15 @@
   opening the screen does not start a scan, `Scan` button does
 - [x] NVS storage for last connected ELM MAC, address type, name and drag results
 - [x] Persistent ELM connection log in LittleFS (`log`, `log all`, `clear` over USB)
-- [x] Drag screen: idle wait, speed-based launch, 10 km/h splits, demo ramp, per-target best, raw sample log
-- [x] Wi-Fi AP with a shared page style: root with SETTINGS / ELM LOG buttons, mobile-friendly
-  config form at `/settings` (POST + PRG redirect), separate log page at `/log` with text
-  endpoint `/elm-log`. Catch-all DNS + probing redirects form a captive portal that opens
-  the root page on connect
+- [x] Drag screen: idle wait, speed-based launch, 10 km/h splits, per-target best; every
+  raw sample is saved to its own CSV in `/drag/` (last 20 runs)
+- [x] Wi-Fi AP with a shared page style: root with SETTINGS / DRAG LOG / ELM LOG buttons,
+  mobile-friendly config form at `/settings` (POST + PRG redirect), drag page at `/drag`
+  with VIEW / DOWNLOAD / DELETE buttons in one row per run, a chart+table viewer at
+  `/drag-view?n=...`, CSV download (`/drag-csv?n=...&dl=1`), single-run deletion
+  (`/drag-delete?n=...&name=...`), and log page at `/log` with text endpoint
+  `/elm-log`. Catch-all DNS + probing redirects form a captive portal that opens the root
+  page on connect
 - [x] WEB button on the Settings screen starts/stops AP, DNS and HTTP; `web_set_enabled()`
   saves `cfg_web_enabled` and restores it on boot (default off, radio down when off)
 - [x] Values persisted in NVS: RPM max/redline, coolant/voltage thresholds, boot animation
@@ -100,7 +104,9 @@
 - Power: Type-C (DC/DC 12 V -> 5 V on the bike)
 - BT to ELM327 over BLE, auto-connect to last saved MAC
 - Wi-Fi AP `SmartDash-<id>` / `smartdash` (http://192.168.4.1) serves the root page with
-  SETTINGS / ELM LOG buttons, the config form at `/settings` and the log page at `/log`
+  SETTINGS / DRAG LOG / ELM LOG buttons, the config form at `/settings`, the drag page at
+  `/drag` (VIEW opens `/drag-view?n=...` with speed/rpm chart and sample table,
+  DOWNLOAD uses `/drag-csv?n=...&dl=1`, DELETE removes one run) and the log page at `/log`
   (text at `/elm-log`); `DNSServer` in catch-all mode plus redirects for `/generate_204`,
   `/hotspot-detect.html`, `/connecttest.txt` and `onNotFound` make a captive portal, so a
   phone opens the root page right after joining the AP. The AP is off by default and is

@@ -12,10 +12,12 @@
 #include <LittleFS.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
+#include <algorithm>
 #include <ctype.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
+#include <vector>
 
 static Preferences prefs;
 static SemaphoreHandle_t logMutex = nullptr;
@@ -40,6 +42,16 @@ static const uint32_t LOG_ROTATE_BYTES = 1024 * 1024;  // 1 МБ на файл
 static const size_t SERIAL_TAIL_BYTES = 16 * 1024;
 static uint32_t bootCount = 0;
 
+// Каждый заезд — отдельный CSV; держим последние DRAG_MAX_FILES, чтобы не
+// заполнить раздел LittleFS (всего 3.5 МБ).
+static const char* DRAG_DIR = "/drag";
+static const uint8_t DRAG_MAX_FILES = 20;
+static const char* KEY_DRAG_RUN_SEQ = "drag_run_seq";
+
+static SemaphoreHandle_t dragMutex = nullptr;
+static File dragFile;
+static uint32_t dragSeq = 0;
+
 // Вызывается только под logMutex.
 static void ensureLogOpen() {
   if (logFileOpen || !fsReady) return;
@@ -56,15 +68,54 @@ static void rotateLogIfNeeded() {
   ensureLogOpen();
 }
 
+// Имена zero-padded, поэтому лексикографический порядок = порядок заездов.
+// Вызывается только под dragMutex.
+static std::vector<String> dragList() {
+  std::vector<String> names;
+  File dir = LittleFS.open(DRAG_DIR);
+  if (!dir) return names;
+  while (true) {
+    File f = dir.openNextFile();
+    if (!f) break;
+    String n = f.name();
+    const int slash = n.lastIndexOf('/');
+    if (slash >= 0) n = n.substring(slash + 1);
+    if (n.endsWith(".csv")) names.push_back(n);
+  }
+  std::sort(names.begin(), names.end());
+  return names;
+}
+
+static String dragPath(const String& name) {
+  return String(DRAG_DIR) + "/" + name;
+}
+
 void storage_init() {
   prefs.begin(NS, false);  // Namespace на чтение/запись
   if (!logMutex) logMutex = xSemaphoreCreateMutex();
+  if (!dragMutex) dragMutex = xSemaphoreCreateMutex();
   bootCount = prefs.getUInt(KEY_LOG_BOOT, 0) + 1;
   prefs.putUInt(KEY_LOG_BOOT, bootCount);
 
   // Раздел spiffs уже есть в таблице разделов default_16MB.csv (3.5 МБ).
   fsReady = LittleFS.begin(true);
-  if (fsReady) ensureLogOpen();
+  if (!fsReady) return;
+  ensureLogOpen();
+
+  // Каталог заездов и ограничение истории. Номер берём из NVS, а не из файлов:
+  // после очистки каталога нумерация не должна начинаться заново.
+  LittleFS.mkdir(DRAG_DIR);
+  dragSeq = prefs.getUInt(KEY_DRAG_RUN_SEQ, 0);
+  std::vector<String> old = dragList();
+  // Если NVS сбросился, а файлы остались — не перезаписываем старые заезды.
+  for (const String& name : old) {
+    const unsigned seq = (unsigned)name.substring(0, 4).toInt();
+    if (seq > dragSeq) dragSeq = seq;
+  }
+  while (old.size() > DRAG_MAX_FILES) {
+    LittleFS.remove(dragPath(old.front()).c_str());
+    old.erase(old.begin());
+  }
 }
 
 String storage_get_last_elm() {
@@ -223,6 +274,161 @@ void storage_clear_log() {
   LittleFS.remove(LOG_PATH);
   LittleFS.remove(LOG_PREV_PATH);
   xSemaphoreGive(logMutex);
+}
+
+// --- Подробные данные заезда -------------------------------------------------
+
+void storage_drag_begin(uint16_t target, uint32_t startMs) {
+  if (!dragMutex || !fsReady) return;
+  xSemaphoreTake(dragMutex, portMAX_DELAY);
+  if (dragFile) {
+    dragFile.close();
+    dragFile = File();
+  }
+  dragSeq++;
+  prefs.putUInt(KEY_DRAG_RUN_SEQ, dragSeq);
+
+  char name[64];
+  snprintf(name, sizeof(name), "%04u_t%u_b%lu.csv", (unsigned)dragSeq,
+           (unsigned)target, (unsigned long)bootCount);
+  dragFile = LittleFS.open(dragPath(name).c_str(), "w");
+  if (dragFile) {
+    char meta[96];
+    snprintf(meta, sizeof(meta), "# target=%u boot=%lu start_ms=%lu", (unsigned)target,
+             (unsigned long)bootCount, (unsigned long)startMs);
+    dragFile.println(meta);
+    dragFile.println("t_ms,tx_ms,rx_ms,rpm,speed_kmh,event,total_cs,splits");
+  }
+
+  // Оставляем только последние заезды: раздел LittleFS небольшой.
+  std::vector<String> files = dragList();
+  while (files.size() > DRAG_MAX_FILES) {
+    LittleFS.remove(dragPath(files.front()).c_str());
+    files.erase(files.begin());
+  }
+  xSemaphoreGive(dragMutex);
+}
+
+void storage_drag_sample(uint32_t tMs, uint32_t txMs, uint32_t rxMs,
+                         int rpm, int speed, const char* event) {
+  if (!dragMutex || !dragFile) return;
+  xSemaphoreTake(dragMutex, portMAX_DELAY);
+  if (dragFile) {
+    char line[128];
+    snprintf(line, sizeof(line), "%lu,%lu,%lu,%d,%d,%s,,", (unsigned long)tMs,
+             (unsigned long)txMs, (unsigned long)rxMs, rpm, speed,
+             event ? event : "S");
+    dragFile.println(line);
+  }
+  xSemaphoreGive(dragMutex);
+}
+
+void storage_drag_finish(uint32_t totalCs, const char* splits,
+                         bool aborted, const char* reason) {
+  if (!dragMutex || !dragFile) return;
+  xSemaphoreTake(dragMutex, portMAX_DELAY);
+  if (dragFile) {
+    char event[48];
+    if (aborted) snprintf(event, sizeof(event), "ABORT:%s", reason ? reason : "");
+    else snprintf(event, sizeof(event), "RESULT");
+    char line[192];
+    snprintf(line, sizeof(line), "0,0,0,0,0,%s,%lu,%s", event,
+             (unsigned long)totalCs, splits ? splits : "");
+    dragFile.println(line);
+    dragFile.flush();
+    dragFile.close();
+    dragFile = File();
+  }
+  xSemaphoreGive(dragMutex);
+}
+
+void storage_drag_reset() {
+  if (!dragMutex || !fsReady) return;
+  xSemaphoreTake(dragMutex, portMAX_DELAY);
+  if (dragFile) {
+    String name = dragFile.name();
+    int slash = name.lastIndexOf('/');
+    if (slash >= 0) name = name.substring(slash + 1);
+    dragFile.close();
+    dragFile = File();
+    if (name.length()) LittleFS.remove(dragPath(name).c_str());
+  }
+  xSemaphoreGive(dragMutex);
+}
+
+size_t storage_drag_count() {
+  if (!dragMutex || !fsReady) return 0;
+  xSemaphoreTake(dragMutex, portMAX_DELAY);
+  const size_t n = dragList().size();
+  xSemaphoreGive(dragMutex);
+  return n;
+}
+
+String storage_drag_name(size_t index) {
+  if (!dragMutex || !fsReady) return String();
+  xSemaphoreTake(dragMutex, portMAX_DELAY);
+  std::vector<String> files = dragList();
+  String name = index < files.size() ? files[index] : String();
+  xSemaphoreGive(dragMutex);
+  return name;
+}
+
+size_t storage_drag_size(size_t index) {
+  const String name = storage_drag_name(index);
+  if (!name.length()) return 0;
+  File f = LittleFS.open(dragPath(name).c_str(), "r");
+  if (!f) return 0;
+  const size_t n = f.size();
+  f.close();
+  return n;
+}
+
+size_t storage_drag_read(size_t index, char* buf, size_t len, size_t offset) {
+  const String name = storage_drag_name(index);
+  if (!name.length() || !buf || !len) return 0;
+  xSemaphoreTake(dragMutex, portMAX_DELAY);
+  if (dragFile) dragFile.flush();  // незавершённый заезд тоже читаем полностью
+  File f = LittleFS.open(dragPath(name).c_str(), "r");
+  size_t n = 0;
+  if (f && f.seek(offset, SeekSet)) n = f.read((uint8_t*)buf, len);
+  if (f) f.close();
+  xSemaphoreGive(dragMutex);
+  return n;
+}
+
+void storage_drag_remove(const String& name) {
+  if (!dragMutex || !fsReady || !name.length()) return;
+  // Имя приходит из веб-формы: не даём выйти за каталог /drag.
+  if (name.indexOf('/') >= 0 || name.indexOf('\\') >= 0 || !name.endsWith(".csv")) return;
+  xSemaphoreTake(dragMutex, portMAX_DELAY);
+  if (dragFile && String(dragFile.name()) == dragPath(name)) {
+    dragFile.close();
+    dragFile = File();
+  }
+  LittleFS.remove(dragPath(name).c_str());
+  xSemaphoreGive(dragMutex);
+}
+
+void storage_drag_clear() {
+  if (!dragMutex || !fsReady) return;
+  xSemaphoreTake(dragMutex, portMAX_DELAY);
+  if (dragFile) {
+    dragFile.close();
+    dragFile = File();
+  }
+  File dir = LittleFS.open(DRAG_DIR);
+  if (dir) {
+    while (true) {
+      File f = dir.openNextFile();
+      if (!f) break;
+      String n = f.name();
+      const int slash = n.lastIndexOf('/');
+      if (slash >= 0) n = n.substring(slash + 1);
+      f.close();
+      if (n.endsWith(".csv")) LittleFS.remove(dragPath(n).c_str());
+    }
+  }
+  xSemaphoreGive(dragMutex);
 }
 
 void storage_dump_log_serial(bool all) {

@@ -87,6 +87,15 @@ bool needFullFlush = false;
 DashData cur;       // Последние значения (анимация или ELM), только UI-задача
 DashData drawn;     // Что сейчас нарисовано в спрайте
 bool dirty = true;  // Хотя бы один виджет отличается от drawn
+
+// Инерция стрелки тахометра: дуга рисуется по сглаженному значению, а не по
+// сырому cur.rpm. Падение медленнее роста — как у механической стрелки.
+// Сглаживание идёт каждый тик UI, а не только по новым снимкам: после резкого
+// падения оборотов стрелка плавно возвращается к цели в течение ~0.6 с.
+constexpr float RPM_TAU_UP_MS = 250.0f;
+constexpr float RPM_TAU_DOWN_MS = 600.0f;
+float shownRpm = 0.0f;
+uint32_t lastRpmSmoothMs = 0;
 bool static_drawn = false;
 
 // Snapshot из BLE-задачи. Он копируется под мьютексом и забирается в ui_loop(),
@@ -143,7 +152,8 @@ struct TouchInput {
   int32_t startX = 0;
   int32_t startY = 0;
   uint32_t startedAt = 0;
-  uint32_t lastClick = 0;
+  uint32_t lastClick = 0;   // защита от повторного свайпа/тапа/кнопки
+  uint32_t lastTapAt = 0;   // для двойного тапа на экране замера
 };
 TouchInput touch;
 
@@ -672,8 +682,8 @@ void format_cs(uint32_t cs, char* buf, size_t len) {
   }
 }
 
-// Сохраняем последний и лучший замер. В журнал подключений пишем строку целиком,
-// чтобы потом можно было сравнить результат с реальным логом ELM.
+// Сохраняем последний и лучший замер. В общий журнал пишем только итог; все
+// сэмплы уже лежат в отдельном CSV заезда.
 void saveDragResult() {
   DragResult r = drag_result();
   String line = drag_serialize(r);
@@ -781,7 +791,8 @@ void draw_drag_screen() {
 
   d.setTextDatum(middle_center);
   d.setTextColor(0x8410, TFT_BLACK);
-  d.drawString("SWIPE L/R - DASH", SCREEN_CENTER_X, 322, 1);
+  d.drawString("DOUBLE TAP - RESET", SCREEN_CENTER_X, 328, 1);
+  d.drawString("SWIPE L/R - DASH", SCREEN_CENTER_X, 348, 1);
   flush();
 }
 
@@ -896,6 +907,18 @@ void handle_tap(int32_t x, int32_t y) {
   }
 }
 
+// Двойной тап по экрану замера: прервать заезд и вернуть автомат в ожидание
+// холостых, не оставляя в истории незавершённый CSV.
+void resetDragRun() {
+  storage_drag_reset();
+  drag_begin();
+  elm_set_race_mode(elm_is_connected());
+  lastDragState = drag_state();
+  dragScreenDirty = true;
+  storage_log("DRAG RESET");
+  draw_drag_screen();
+}
+
 // Опрос CST816S. Свайп >=60 px за 1 с:
 //   вверх с Dash — ELM Monitor, вниз с Dash — Settings;
 //   вниз с ELM Monitor и вверх с Settings — назад на Dash;
@@ -964,7 +987,19 @@ void poll_touch() {
   int32_t adx = dx < 0 ? -dx : dx;
   int32_t ady = dy < 0 ? -dy : dy;
 
-  if (now - touch.startedAt < 800 && adx < 24 && ady < 24 && now - touch.lastClick > 250) {
+  const bool isTap = now - touch.startedAt < 800 && adx < 24 && ady < 24;
+  if (isTap && screen != Screen::Drag) touch.lastTapAt = 0;
+  if (isTap && screen == Screen::Drag &&
+      touch.lastTapAt && now - touch.lastTapAt <= 400) {
+    // Второй тап за 400 мс — сброс замера. Третий не продолжает серию.
+    touch.lastTapAt = 0;
+    touch.lastClick = now;
+    SD_LOGln("[UI] drag reset (double tap)");
+    resetDragRun();
+    return;
+  }
+  if (isTap) touch.lastTapAt = now;
+  if (isTap && now - touch.lastClick > 250) {
     touch.lastClick = now;
     SD_LOG("[UI] tap %d,%d\n", (int)touch.x, (int)touch.y);
     handle_tap(touch.x, touch.y);
@@ -995,10 +1030,14 @@ void switchScreen(Screen next) {
   screen = next;
 
   if (prev == Screen::Drag) {
+    // Уходим с экрана посреди заезда: закрываем файл, если он был открыт.
+    // storage_drag_finish() ничего не сделает, если заезд не начинался.
+    storage_drag_finish(0, "", true, "Cancelled");
     drag_cancel();
     elm_set_race_mode(false);
   }
 
+  touch.lastTapAt = 0;  // новая серия тапов после смены экрана
   static_drawn = false;
   drawn.rpm = -999;
   drawn.speed_kmh = -999;
@@ -1142,15 +1181,31 @@ void ui_settings_changed() { settingsRedrawPending = true; }
 // при изменении только напряжения или точки статуса не перерисовывать дугу RPM.
 // Готовый кадр уходит на панель не целиком, а только изменившимися кусками.
 void ui_show_dash() {
-  if (!static_drawn) draw_static();
+  const bool freshStatic = !static_drawn;
+  if (freshStatic) draw_static();
+
+  // Сглаживание идёт каждый тик UI, а не только по новым снимкам: после резкого
+  // падения оборотов стрелка плавно возвращается к цели в течение ~0.6 с.
+  uint32_t rpmNow = millis();
+  float targetRpm = constrain(cur.rpm, 0, gSettings.rpmMax);
+  if (freshStatic || lastRpmSmoothMs == 0 || rpmNow - lastRpmSmoothMs > 1000) {
+    shownRpm = targetRpm;
+  } else {
+    uint32_t dt = rpmNow - lastRpmSmoothMs;
+    float tau = targetRpm >= shownRpm ? RPM_TAU_UP_MS : RPM_TAU_DOWN_MS;
+    shownRpm += (targetRpm - shownRpm) * (1.0f - expf(-(float)dt / tau));
+  }
+  lastRpmSmoothMs = rpmNow;
+  const int shownRpmInt = (int)lroundf(shownRpm);
+
+  if (drawn.rpm != shownRpmInt) {
+    // Sentinel означает свежую статику: дугу нужно перерисовать целиком.
+    if (drawn.rpm < 0) draw_rpm(shownRpmInt);
+    else update_rpm(drawn.rpm, shownRpmInt);
+    drawn.rpm = shownRpmInt;
+  }
 
   if (dirty) {
-    if (drawn.rpm != cur.rpm) {
-      // Sentinel означает свежую статику: дугу нужно перерисовать целиком.
-      if (drawn.rpm < 0) draw_rpm(cur.rpm);
-      else update_rpm(drawn.rpm, cur.rpm);
-      drawn.rpm = cur.rpm;
-    }
     if (drawn.speed_kmh != cur.speed_kmh) {
       draw_speed(cur.speed_kmh);
       drawn.speed_kmh = cur.speed_kmh;
@@ -1281,17 +1336,30 @@ void ui_loop() {
       // (время холостых не накапливается и пересечения отметок не считаются).
       const DragState before = drag_state();
       drag_feed(cur.t_ms, cur.rpm, cur.speed_kmh, cur.connected);
-      // Сырые сэмплы нужны, чтобы потом пересчитать замер с другими порогами.
-      // Пишем только от Armed до финиша, иначе ожидание холостых засоряет журнал.
+      // Все сэмплы от Armed до финиша идут в отдельный CSV заезда, чтобы их
+      // можно было разобрать через веб; в общий ELM-журнал они больше не пишутся.
       if (before == DragState::Armed || before == DragState::Running) {
-        storage_log("DRAG S t=%u tx=%u rx=%u rpm=%d spd=%d",
-                    cur.t_ms, cur.t_tx_ms, cur.t_rx_ms, cur.rpm, cur.speed_kmh);
+        storage_drag_sample(cur.t_ms, cur.t_tx_ms, cur.t_rx_ms, cur.rpm, cur.speed_kmh,
+                            before == DragState::Armed ? "ARM" : "RUN");
       }
     }
 
     DragState st = drag_state();
     if (st != lastDragState) {
-      if (st == DragState::Finished || st == DragState::Aborted) saveDragResult();
+      if (st == DragState::Armed && lastDragState == DragState::Waiting) {
+        storage_drag_begin(drag_result().target, cur.t_ms);
+      }
+      if (st == DragState::Finished || st == DragState::Aborted) {
+        DragResult r = drag_result();
+        String splits;
+        for (int i = 0; i < DRAG_MAX_SPLITS; i++) {
+          if (i) splits += "|";
+          splits += r.has[i] ? String(r.split_cs[i]) : String("-1");
+        }
+        storage_drag_finish(r.total_cs, splits.c_str(), st == DragState::Aborted,
+                            drag_abort_text(r.abort));
+        saveDragResult();
+      }
       lastDragState = st;
       dragScreenDirty = true;
     }
