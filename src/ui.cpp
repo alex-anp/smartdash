@@ -194,7 +194,10 @@ void addDirtyRect(int x, int y, int w, int h) {
 
 void flushDirty() {
   if (!canvas_ok) { dirtyRectCount = 0; needFullFlush = false; return; }
-  if (needFullFlush) { flush(); return; }
+  // Во время стартовой анимации за 100 мс меняются сразу дуга, скорость и низ;
+  // несколько частичных QSPI-передач подряд дают на панели битые сектора.
+  // Анимация длится 4 с и не влияет на частоту опроса — выводим её целым кадром.
+  if (needFullFlush || !sweep_done) { flush(); return; }
   if (dirtyRectCount == 0) return;
 
   auto& disp = display_get();
@@ -220,19 +223,25 @@ bool in_rect(int32_t x, int32_t y, int x0, int y0, int x1, int y1) {
   return x >= x0 && x <= x1 && y >= y0 && y <= y1;
 }
 
-// Ограничивающий прямоугольник участка дуги. Грубая оценка по наружному радиусу
-// с шагом 2° и запасом 2 px: для небольшой дельты RPM это обычно 10–30 px.
+// Ограничивающий прямоугольник участка дуги. Учитываем ОБА радиуса кольца:
+// оценка только по наружному (176) теряет до 16 px у внутреннего края (160),
+// из-за чего на панели оставались старые пиксели — «битые сектора» при анимации.
+// Шаг 2° и запас 2 px; для небольшой дельты RPM это обычно 10–30 px.
 void markArcDirty(float fromAngle, float toAngle) {
   if (toAngle < fromAngle) { const float t = fromAngle; fromAngle = toAngle; toAngle = t; }
   int minX = SCREEN_WIDTH, minY = SCREEN_HEIGHT, maxX = 0, maxY = 0;
   auto addPoint = [&](float deg) {
     const float a = deg * (float)M_PI / 180.0f;
-    const int x = SCREEN_CENTER_X + (int)lroundf(cosf(a) * RPM_ARC_R_OUT);
-    const int y = SCREEN_CENTER_Y + (int)lroundf(sinf(a) * RPM_ARC_R_OUT);
-    if (x < minX) minX = x;
-    if (y < minY) minY = y;
-    if (x > maxX) maxX = x;
-    if (y > maxY) maxY = y;
+    const float ca = cosf(a), sa = sinf(a);
+    // Оба края кольца; промежуточные радиусы лежат внутри их биссектрисы.
+    for (int r : {RPM_ARC_R_OUT, RPM_ARC_R_IN}) {
+      const int x = SCREEN_CENTER_X + (int)lroundf(ca * r);
+      const int y = SCREEN_CENTER_Y + (int)lroundf(sa * r);
+      if (x < minX) minX = x;
+      if (y < minY) minY = y;
+      if (x > maxX) maxX = x;
+      if (y > maxY) maxY = y;
+    }
   };
   addPoint(fromAngle);
   for (float a = ceilf(fromAngle / 2.0f) * 2.0f; a < toAngle; a += 2.0f) addPoint(a);
@@ -1019,6 +1028,10 @@ void ui_loop() {
 
   poll_touch();
   poll_button();
+
+  // Подключившийся ELM прерывает анимацию: дальше значения приходят из OBD.
+  // Отмечаем конец анимации, чтобы вернуться к частичному выводу кадра.
+  if (connected && !sweep_done) sweep_done = true;
 
   // На экране замера стартовая анимация не нужна: там своя синтетика или ELM.
   if (screen != Screen::Drag && !connected && !sweep_done && now - last_sweep_ms >= SWEEP_INTERVAL_MS) {
