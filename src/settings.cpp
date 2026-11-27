@@ -50,6 +50,7 @@ void settings_normalize() {
 
   gSettings.bootAnim = gSettings.bootAnim ? true : false;
   gSettings.webEnabled = gSettings.webEnabled ? true : false;
+  gSettings.rotation = snapInt(gSettings.rotation, 0, 270, 90);
   gSettings.model[SETTINGS_MODEL_LEN - 1] = '\0';
 }
 
@@ -64,6 +65,7 @@ void settings_init() {
   gSettings.bootAnim = true;
   // По умолчанию AP выключен: радио и HTTP не тратят ресурсы, пока они не нужны.
   gSettings.webEnabled = false;
+  gSettings.rotation = DISPLAY_ROTATION;
   snprintf(gSettings.model, sizeof(gSettings.model), "%s", VEHICLE_NAME);
 
   Preferences p;
@@ -77,6 +79,7 @@ void settings_init() {
   gSettings.voltHigh = p.getUInt("cfg_volt_hi", (uint32_t)lroundf(gSettings.voltHigh * 10.0f)) / 10.0f;
   gSettings.bootAnim = p.getUInt("cfg_boot_anim", 1) != 0;
   gSettings.webEnabled = p.getUInt("cfg_web_enabled", 0) != 0;
+  gSettings.rotation = (int)p.getUInt("cfg_rotation", (uint32_t)gSettings.rotation);
   String savedModel = p.getString("cfg_model", gSettings.model);
   p.end();
 
@@ -96,6 +99,7 @@ void settings_save() {
   p.putUInt("cfg_volt_hi", (uint32_t)lroundf(gSettings.voltHigh * 10.0f));
   p.putUInt("cfg_boot_anim", gSettings.bootAnim ? 1u : 0u);
   p.putUInt("cfg_web_enabled", gSettings.webEnabled ? 1u : 0u);
+  p.putUInt("cfg_rotation", (uint32_t)gSettings.rotation);
   p.putString("cfg_model", gSettings.model);
   p.end();
 }

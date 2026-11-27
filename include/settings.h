@@ -21,6 +21,7 @@ struct Settings {
   float voltHigh;       // до high — зелёный, выше — красный
   bool bootAnim;        // однократная стартовая анимация
   bool webEnabled;      // держать Wi-Fi AP / веб-интерфейс включённым
+  int rotation;         // поворот экрана, градусы: 0 / 90 / 180 / 270
   char model[SETTINGS_MODEL_LEN];  // подпись на заставке
 };
 

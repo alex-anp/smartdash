@@ -116,6 +116,13 @@ void display_init() {
   gfx.drawString("Display OK", SCREEN_CENTER_X, SCREEN_CENTER_Y + 40, 2);
 }
 
+// Поворот задаётся из UI-задачи. Вместе с MADCTL панели LovyanGFX сам
+// пересчитывает координаты тача, поэтому свайпы и тап-зоны остаются на месте.
+void display_set_rotation(int degrees) {
+  int r = constrain(degrees / 90, 0, 3);
+  gfx.setRotation((uint_fast8_t)r);
+}
+
 void display_clear(uint16_t color) { gfx.fillScreen(color); }
 
 void display_set_brightness(uint8_t percent) {

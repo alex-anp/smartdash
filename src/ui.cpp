@@ -149,9 +149,10 @@ TouchInput touch;
 // Экран Settings только показывает значения: редактирование перенесено в веб.
 // web_loop() выставляет флаг, ui_loop() инвалидирует кэши и перерисовывает экран.
 enum class SettingId : uint8_t {
-  RpmMax, Redline, CoolLo, CoolHi, VoltLo, VoltMid, VoltHi, Anim, Model, Count
+  RpmMax, Redline, CoolLo, CoolHi, VoltLo, VoltMid, VoltHi, Rotation, Anim, Model, Count
 };
 bool settingsRedrawPending = false;
+int appliedRotation = -1;  // уже применённый к панели поворот, градусы
 
 // Линейное преобразование RPM в угол с ограничением по текущей шкале.
 float rpm_angle(int rpm) {
@@ -161,6 +162,16 @@ float rpm_angle(int rpm) {
 
 // Цель отрисовки: спрайт, если он создан; иначе панель напрямую.
 lgfx::LGFX_Device& g() { return canvas_ok ? (lgfx::LGFX_Device&)canvas : display_get(); }
+
+// Поворот меняет MADCTL панели и адресацию спрайта, поэтому применяется только
+// здесь — в UI-задаче — и всегда сопровождается полной перерисовкой кадра.
+void apply_rotation() {
+  if (appliedRotation == gSettings.rotation) return;
+  appliedRotation = gSettings.rotation;
+  display_set_rotation(appliedRotation);
+  dirtyRectCount = 0;
+  needFullFlush = true;
+}
 
 // Полный вывод кадра: используется при смене экрана и после перерисовки статики.
 // Все отложенные «грязные» прямоугольники при этом уже не нужны.
@@ -786,6 +797,7 @@ const char* settingLabel(SettingId id) {
     case SettingId::VoltLo:  return "VOLT LOW";
     case SettingId::VoltMid: return "VOLT MID";
     case SettingId::VoltHi:  return "VOLT HIGH";
+    case SettingId::Rotation: return "ROTATION";
     case SettingId::Anim:    return "BOOT ANIM";
     case SettingId::Model:   return "MODEL";
     default:                 return "";
@@ -801,6 +813,7 @@ String settingValue(SettingId id) {
     case SettingId::VoltLo:  return String(gSettings.voltLow, 1) + "V";
     case SettingId::VoltMid: return String(gSettings.voltMid, 1) + "V";
     case SettingId::VoltHi:  return String(gSettings.voltHigh, 1) + "V";
+    case SettingId::Rotation: return String(gSettings.rotation);
     case SettingId::Anim:    return gSettings.bootAnim ? String("ON") : String("OFF");
     case SettingId::Model:   return String(gSettings.model);
     default:                 return String();
@@ -1020,6 +1033,7 @@ void switchScreen(Screen next) {
 // же ui_show_dash() перерисовала все виджеты, включая видимый ноль скорости.
 void ui_init() {
   pinMode(BTN_PIN, INPUT_PULLUP);
+  apply_rotation();  // заставка и первый кадр уже рисуются в нужной ориентации
   if (!canvas_ok) {
     canvas.setPsram(true);
     canvas.setColorDepth(16);
@@ -1163,6 +1177,7 @@ void ui_loop() {
   // Полный кадр нужен, потому что изменились риски/зоны дуги, а не только числа.
   if (settingsRedrawPending) {
     settingsRedrawPending = false;
+    apply_rotation();
     static_drawn = false;
     drawn.rpm = -999;
     drawn.speed_kmh = -999;

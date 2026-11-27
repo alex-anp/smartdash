@@ -163,6 +163,22 @@ String settingsPage(bool saved) {
   p += numField("volt_hi", "VOLT HIGH", String(gSettings.voltHigh, 1), "10", "18", "0.5", "V");
   p += "</fieldset>";
 
+  // Панель ST77916 поддерживает только кратные 90°, остальные значения
+  // settings_normalize() округляет до ближайшего.
+  p += "<fieldset><legend>Display</legend>";
+  p += "<label><span>ROTATION</span></label><select name='rotation'>";
+  static const int rotations[] = {0, 90, 180, 270};
+  for (int r : rotations) {
+    p += "<option value='";
+    p += String(r);
+    p += "'";
+    if (gSettings.rotation == r) p += " selected";
+    p += ">";
+    p += String(r);
+    p += " deg</option>";
+  }
+  p += "</select></fieldset>";
+
   p += "<fieldset><legend>Other</legend>";
   p += "<label><span>BOOT ANIM</span></label><select name='boot_anim'>";
   p += "<option value='1'";
@@ -214,6 +230,7 @@ void handle_settings_post() {
   parseFloat("volt_lo", next.voltLow);
   parseFloat("volt_mid", next.voltMid);
   parseFloat("volt_hi", next.voltHigh);
+  parseInt("rotation", next.rotation);
   if (server.hasArg("boot_anim")) next.bootAnim = server.arg("boot_anim") == "1";
   if (server.hasArg("model")) {
     String model = server.arg("model");
