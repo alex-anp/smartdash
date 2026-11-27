@@ -11,8 +11,9 @@
  *    приглашения '>' или таймаута -> разобрать. Приглашение уже означает готовность,
  *    поэтому дополнительная пауза не нужна; она вырастает только если клон ответил
  *    по таймауту или без 410C, и медленно уменьшается после серии удачных ответов.
- *    Быстрые PID запрашиваются одним запросом 010C0D; температура и напряжение
- *    чередуются отдельно раз в секунду.
+ *    Профиль опроса зависит от экрана: Dash берёт быстрые PID как можно чаще и
+ *    температуру/напряжение раз в 2 с, Drag — только обороты и скорость. Если
+ *    клон не понимает 010C0D (7F 01 12), быстрые PID уходят раздельно: 010C/010D.
  *  - Ответы приходят асинхронно в notifyCB(); rxBuf защищён rxMux, а список
  *    результатов сканирования — foundMux.
  *
@@ -28,6 +29,7 @@
 #include <vector>
 
 #include "config.h"
+#include "perf.h"
 #include "storage.h"
 #include "ui.h"
 
@@ -925,108 +927,105 @@ bool parseVoltage(const String& resp, float& volt) {
   return true;
 }
 
-// Круговой опрос OBD. Быстрая пара (обороты + скорость) запрашивается одним
-// запросом 010C0D и не ждёт медленных параметров. 0105 и ATRV чередуются раз в
-// SLOW_POLL_MS, то есть каждый параметр обновляется раз в 2 с. Раньше все четыре
-// PID шли по очереди с паузой 120 мс, поэтому обороты и скорость менялись раз в
-// 1–3 с. Если адаптер не понимает несколько PID в одном запросе, после
-// MULTI_FAIL_LIMIT неудач включается старый round-robin.
+// Профили опроса зависят от рабочего экрана:
+//   Dash — быстрые PID (обороты и скорость) как можно чаще; температура и
+//          напряжение чередуются раз в SLOW_POLL_MS (каждый раз в 2 с).
+//   Drag — только обороты и скорость, медленные PID не запрашиваются вовсе.
+// Разбор быстрых ответов общий для обоих профилей: так откат 010C0D ->
+// 010C/010D (этот адаптер отвечает 7F 01 12) работает и во время замера.
+
+// Разобрать ответ на быстрый запрос. Возвращает true, когда сэмпл пора отдать
+// в UI: при 010C0D сразу, при раздельных PID — после ответа 010D (в нём оба
+// значения уже свежие).
+bool handleFastReply(const String& resp, bool fresh) {
+  if (useMultiPid) {
+    const FastPids p = parseFastPids(resp);
+    notePollResult(fresh && p.hasRpm);
+    // Откат на раздельные PID — только когда пауза уже максимальна: иначе
+    // missing 410C может быть просто признаком слишком короткой паузы.
+    if (fresh && !p.hasRpm && pollGap >= POLL_GAP_MAX_MS) {
+      if (++multiFails >= MULTI_FAIL_LIMIT) {
+        useMultiPid = false;
+        cmdPidStep = 0;
+        storage_log("POLL multi-PID unsupported -> legacy 010C/010D/0105/ATRV");
+      }
+    } else if (p.hasRpm) {
+      multiFails = 0;
+    }
+    if (p.hasRpm) dash.rpm = p.rpmRaw / 4;
+    if (p.hasSpeed) dash.speed_kmh = p.speed;
+    return true;
+  }
+
+  std::vector<int> bytes;
+  if (cmdPending == "010C") {
+    if (parsePid(resp, 0x01, 0x0C, bytes) && bytes.size() >= 2)
+      dash.rpm = (bytes[0] * 256 + bytes[1]) / 4;
+    notePollResult(fresh && bytes.size() >= 2);
+    return false;  // ждём скорость
+  }
+  if (cmdPending == "010D") {
+    if (parsePid(resp, 0x01, 0x0D, bytes) && bytes.size() >= 1)
+      dash.speed_kmh = bytes[0];
+    notePollResult(fresh && bytes.size() >= 1);
+    return true;
+  }
+  return false;  // useMultiPid мог переключиться посреди запроса
+}
+
+// Следующий быстрый запрос: одна команда на оба PID или две раздельные.
+const char* nextFastCmd() {
+  if (useMultiPid) return "010C0D";
+  const char* cmd = (cmdPidStep % 2 == 0) ? "010C" : "010D";
+  cmdPidStep++;
+  return cmd;
+}
+
 void handlePoll() {
   if (!connected || initState != INIT_DONE) return;
   static const char* legacyCmds[] = {"010C", "010D", "0105", "ATRV"};
   uint32_t now = millis();
 
-  // Режим замера. Два быстрых PID одним запросом; температура и напряжение
-  // на это время не опрашиваются, чтобы не терять сэмплы разгона.
-  if (raceMode) {
-    if (cmdState == CMD_WAIT) {
-      String resp;
-      if (!readCmdResult(resp)) return;
-      const bool fresh = resp.indexOf('>') >= 0;
-      const FastPids p = parseFastPids(resp);
-      notePollResult(fresh && p.hasRpm);
-      if (p.hasRpm) dash.rpm = p.rpmRaw / 4;
-      if (p.hasSpeed) dash.speed_kmh = p.speed;
-      dash.connected = true;
-      // При таймауте '>' нет — это не свежий ответ, середину интервала не используем.
-      pushData(dash, fresh);
-      lastPoll = now;
-      return;
-    }
-    if (now - lastPoll < pollGap) return;
-    if (!sendCmdAsync("010C0D", 900)) lastPoll = now;
-    return;
-  }
-
   if (cmdState == CMD_WAIT) {
     String resp;
     if (!readCmdResult(resp)) return;
     const bool fresh = resp.indexOf('>') >= 0;
-    // Признак неготовности адаптера — таймаут или отсутствие нужного PID.
-    // Для медленных запросов проверяем только таймаут: NO DATA у 0105 нормальна.
-    bool good = fresh;
     if (pollLogBudget > 0) {
       storage_log("POLL %s -> %s", cmdPending.c_str(), resp.c_str());
       pollLogBudget--;
     }
+    dash.connected = true;
 
-    std::vector<int> bytes;
-    if (useMultiPid) {
-      // Быстрая пара: температура и напряжение сюда уже не попадают.
-      if (cmdPending == "010C0D") {
-        const FastPids p = parseFastPids(resp);
-        if (p.hasRpm) dash.rpm = p.rpmRaw / 4;
-        if (p.hasSpeed) dash.speed_kmh = p.speed;
-        notePollResult(good && p.hasRpm);
-        // Откат на раздельные PID — только когда пауза уже максимальна: иначе
-        // missing 410C может быть просто признаком слишком короткой паузы.
-        if (fresh && !p.hasRpm && pollGap >= POLL_GAP_MAX_MS) {
-          if (++multiFails >= MULTI_FAIL_LIMIT) {
-            useMultiPid = false;
-            cmdPidStep = 0;
-            storage_log("POLL multi-PID unsupported -> legacy 010C/010D/0105/ATRV");
-          }
-        } else if (p.hasRpm) {
-          multiFails = 0;
-        }
-      } else if (cmdPending == "0105") {
-        if (parsePid(resp, 0x01, 0x05, bytes) && bytes.size() >= 1) dash.coolant_c = bytes[0] - 40;
+    const bool fast = cmdPending == "010C0D" || cmdPending == "010C" || cmdPending == "010D";
+    bool push = false;
+    if (fast) {
+      push = handleFastReply(resp, fresh);
+    } else {
+      // Медленные PID есть только на основном экране.
+      std::vector<int> bytes;
+      if (cmdPending == "0105") {
+        if (parsePid(resp, 0x01, 0x05, bytes) && bytes.size() >= 1)
+          dash.coolant_c = bytes[0] - 40;
       } else if (cmdPending == "ATRV") {
         float v;
         if (parseVoltage(resp, v)) dash.volt = v;
       }
-    } else {
-      // Резервный путь для адаптеров без поддержки нескольких PID.
-      switch (cmdPidStep % 4) {
-        case 0:
-          if (parsePid(resp, 0x01, 0x0C, bytes) && bytes.size() >= 2)
-            dash.rpm = (bytes[0] * 256 + bytes[1]) / 4;
-          break;
-        case 1:
-          if (parsePid(resp, 0x01, 0x0D, bytes) && bytes.size() >= 1) dash.speed_kmh = bytes[0];
-          break;
-        case 2:
-          if (parsePid(resp, 0x01, 0x05, bytes) && bytes.size() >= 1) dash.coolant_c = bytes[0] - 40;
-          break;
-        case 3: {
-          float v;
-          if (parseVoltage(resp, v)) dash.volt = v;
-          break;
-        }
-      }
-      cmdPidStep++;
+      // Для медленных запросов проверяем только таймаут: NO DATA у 0105 нормальна.
+      notePollResult(fresh);
+      push = true;
     }
-    if (cmdPending != "010C0D") notePollResult(good);
-
-    dash.connected = true;
-    pushData(dash, fresh);
+    // При таймауте '>' нет — это не свежий ответ, середину интервала не используем.
+    if (push) pushData(dash, fresh);
     lastPoll = now;
     return;
   }
 
   if (now - lastPoll < pollGap) return;
   const char* cmd;
-  if (useMultiPid) {
+  if (raceMode) {
+    // Экран замера: только обороты и скорость.
+    cmd = nextFastCmd();
+  } else if (useMultiPid) {
     // Медленные параметры не вытесняют быстрые: между ними хотя бы секунда.
     // Температура и напряжение чередуются, поэтому каждый приходит раз в 2 с.
     if (now - lastSlowPoll >= SLOW_POLL_MS) {
@@ -1037,7 +1036,9 @@ void handlePoll() {
       cmd = "010C0D";
     }
   } else {
+    // Адаптер без multi-PID: все четыре значения раздельными запросами.
     cmd = legacyCmds[cmdPidStep % 4];
+    cmdPidStep++;
   }
   if (!sendCmdAsync(cmd, 900)) lastPoll = now;  // чтобы не было частого повтора
 }
@@ -1215,7 +1216,9 @@ void elm_loop() {
 // поддерживает автомат радио, не конкурируя с ядром UI.
 void elmTask(void*) {
   for (;;) {
+    const uint32_t t = micros();
     elm_loop();
+    perf_add(PERF_ELM, micros() - t);
     vTaskDelay(pdMS_TO_TICKS(2));
   }
 }

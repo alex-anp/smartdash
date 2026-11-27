@@ -68,6 +68,9 @@
 #define ELM_AUTO_CONNECT true
 #define ELM_RECONNECT_INTERVAL 3000
 
+// Период сводки длительностей циклов в журнал (см. src/perf.cpp).
+#define PERF_REPORT_MS 2000
+
 // Геометрия UI
 #define SCREEN_CENTER_X (SCREEN_WIDTH / 2)
 #define SCREEN_CENTER_Y (SCREEN_HEIGHT / 2)

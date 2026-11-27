@@ -18,6 +18,7 @@
 #include "display.h"
 #include "elm327.h"
 #include "ui.h"
+#include "perf.h"
 #include "settings.h"
 #include "storage.h"
 #include "web.h"
@@ -49,8 +50,19 @@ void setup() {
 }
 
 void loop() {
+  perf_cycle(micros());  // Такт основной задачи; раз в PERF_REPORT_MS пишет сводку
+
+  uint32_t t = micros();
   ui_loop();    // Ввод, стартовая анимация, точки статуса и перерисовка виджетов
+  perf_add(PERF_UI, micros() - t);
+
+  t = micros();
   web_loop();   // Обработать один ожидающий HTTP-запрос, если он есть
+  perf_add(PERF_WEB, micros() - t);
+
+  t = micros();
   storage_serial_loop();  // Команды 'log' / 'clear' через USB Serial
+  perf_add(PERF_SERIAL, micros() - t);
+
   delay(2);     // Отдать управление планировщику; опрос OBD идёт в elmTask
 }

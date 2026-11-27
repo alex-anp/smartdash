@@ -23,6 +23,7 @@
 #include "display.h"
 #include "dragrace.h"
 #include "elm327.h"
+#include "perf.h"
 #include "settings.h"
 #include "sim.h"
 #include "storage.h"
@@ -1172,6 +1173,7 @@ void ui_show_dash() {
 // отрисовывается активный. Данные от реального ELM сразу останавливают анимацию.
 void ui_loop() {
   uint32_t now = millis();
+  uint32_t t = micros();
 
   // Настройки пришли из веба: сбрасываем кэши виджетов и статики дашборда.
   // Полный кадр нужен, потому что изменились риски/зоны дуги, а не только числа.
@@ -1193,6 +1195,7 @@ void ui_loop() {
     else if (screen == Screen::ElmConnect) elm_screen_dirty = true;
     else if (screen == Screen::Drag) dragScreenDirty = true;
   }
+  perf_add(PERF_UI_SETUP, micros() - t);
 
   // Тестовый режим имитирует подключённый адаптер: стартовая анимация
   // останавливается, индикатор "ELM OK" загорается как при реальном подключении.
@@ -1216,8 +1219,16 @@ void ui_loop() {
     dirty = true;
   }
 
+  t = micros();
+  const Screen screenBeforeInput = screen;
   poll_touch();
   poll_button();
+  perf_add(PERF_UI_INPUT, micros() - t);
+
+  t = micros();
+  // Снимок взят до обработки ввода. На входе в Drag он ещё с дашборда: такой
+  // сэмпл мог бы сразу прервать замер (ELM LOST) или испортить интерполяцию.
+  if (screen == Screen::Drag && screenBeforeInput != Screen::Drag) haveSample = false;
 
   // Подключившийся ELM прерывает анимацию: дальше значения приходят из OBD.
   // Отмечаем конец анимации, чтобы вернуться к частичному выводу кадра.
@@ -1301,4 +1312,5 @@ void ui_loop() {
   } else {
     ui_show_dash();
   }
+  perf_add(PERF_UI_DRAW, micros() - t);
 }

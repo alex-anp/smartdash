@@ -19,6 +19,12 @@
 - `Serial.printf` over USB CDC can block ~800 ms, so runtime logs are disabled
   unless `-DSMARTDASH_SERIAL_DEBUG=1` is added to `build_flags`
 - BLE scan/connect/AT state machine runs on core 0; UI + web run on core 1
+- `src/perf.cpp` writes `PERF` lines every `PERF_REPORT_MS` (2 s): average/max for
+  `ui` (with setup/input/draw sub-lanes), `elm`, `web`, `serial`, the cost of the
+  report itself (`log`), and the maximum interval between `loop()` entries (`period`).
+  LittleFS writes are included in `period`, not in UI duration; sampling itself is
+  just `micros()` + a spinlock. `src/storage.cpp` keeps `/elm.log` open between
+  writes, because open/close per line cost tens of milliseconds
 
 ## Current status
 
@@ -26,9 +32,10 @@
 - [x] Touch/controller and backlight behavior confirmed
 - [x] Minimal dashboard UI implemented in `src/ui.cpp`
 - [x] BLE scan/connect + AT init implemented in `src/elm327.cpp`
-- [x] OBD polling: `010C0D` (RPM + speed in one response) as fast path; `0105` and `ATRV`
-  alternating once per second (each parameter every 2 s); automatic fallback to separate
-  `010C`/`010D`/`0105`/`ATRV` if multi-PID is unsupported
+- [x] OBD polling: screen-dependent profiles — Dash requests fast PIDs as often as
+  possible plus `0105`/`ATRV` alternating once per second (each parameter every 2 s);
+  Drag requests only RPM and speed; automatic fallback to separate `010C`/`010D` if
+  multi-PID is unsupported (the adapter answers `7F 01 12` to `010C0D`)
 - [x] Display update: incremental RPM arc and dirty-rectangle sprite pushes instead of full-frame flush
 - [x] One-shot startup sweep, no endless demo
 - [x] Navigation: from Dash swipe up opens ELM Monitor, swipe down opens read-only Settings; swipe down on ELM and swipe up on Settings go back; left/right toggles Dash <-> Drag; vertical swipes ignored on Drag
@@ -83,7 +90,9 @@
   `speed - ss.cc` (live during the run, reached speed on finish), 10 rows
   (`km/h | time | split`). The run ends at the selected limit or on an RPM drop;
   taps are ignored. In race mode
-  `elm327.cpp` polls only `010C0D` with a `millis()` timestamp; `DashData` snapshots
+  `elm327.cpp` polls only RPM and speed: `010C0D` when the adapter supports it,
+  otherwise alternating `010C`/`010D` (some clones answer `7F 01 12` to the
+  combined request). Samples carry a `millis()` timestamp and `DashData` snapshots
   are copied under a mutex so the UI never renders a half-updated sample.
 
 ## Wiring notes

@@ -20,6 +20,10 @@
 static Preferences prefs;
 static SemaphoreHandle_t logMutex = nullptr;
 static bool fsReady = false;
+// Файл журнала держим открытым: open/close на каждую строку стоит десятки мс
+// и превращался в заметный простой основного цикла (см. PERF period).
+static File logFile;
+static bool logFileOpen = false;
 
 static const char* NS = "smartdash";
 static const char* KEY_LAST_ELM = "last_elm";
@@ -36,6 +40,22 @@ static const uint32_t LOG_ROTATE_BYTES = 1024 * 1024;  // 1 МБ на файл
 static const size_t SERIAL_TAIL_BYTES = 16 * 1024;
 static uint32_t bootCount = 0;
 
+// Вызывается только под logMutex.
+static void ensureLogOpen() {
+  if (logFileOpen || !fsReady) return;
+  logFile = LittleFS.open(LOG_PATH, "a");
+  logFileOpen = (bool)logFile;
+}
+
+static void rotateLogIfNeeded() {
+  if (!logFileOpen || logFile.size() < LOG_ROTATE_BYTES) return;
+  logFile.close();
+  logFileOpen = false;
+  LittleFS.remove(LOG_PREV_PATH);
+  LittleFS.rename(LOG_PATH, LOG_PREV_PATH);
+  ensureLogOpen();
+}
+
 void storage_init() {
   prefs.begin(NS, false);  // Namespace на чтение/запись
   if (!logMutex) logMutex = xSemaphoreCreateMutex();
@@ -44,6 +64,7 @@ void storage_init() {
 
   // Раздел spiffs уже есть в таблице разделов default_16MB.csv (3.5 МБ).
   fsReady = LittleFS.begin(true);
+  if (fsReady) ensureLogOpen();
 }
 
 String storage_get_last_elm() {
@@ -123,20 +144,14 @@ void storage_log(const char* fmt, ...) {
   }
 
   xSemaphoreTake(logMutex, portMAX_DELAY);
-  File f = LittleFS.open(LOG_PATH, "a");
-  if (f && f.size() >= LOG_ROTATE_BYTES) {
-    f.close();
-    LittleFS.remove(LOG_PREV_PATH);
-    LittleFS.rename(LOG_PATH, LOG_PREV_PATH);
-    f = LittleFS.open(LOG_PATH, "a");
-  }
-  if (f) {
+  ensureLogOpen();
+  rotateLogIfNeeded();
+  if (logFileOpen) {
     const uint32_t t = millis();
     char full[192];
     snprintf(full, sizeof(full), "b%lu t%lu.%03lu %s", (unsigned long)bootCount,
              (unsigned long)(t / 1000), (unsigned long)(t % 1000), line);
-    f.println(full);
-    f.close();
+    logFile.println(full);
   }
   xSemaphoreGive(logMutex);
 }
@@ -154,7 +169,13 @@ static size_t fileSize(const char* path) {
 size_t storage_log_size() {
   if (!logMutex || !fsReady) return 0;
   xSemaphoreTake(logMutex, portMAX_DELAY);
-  const size_t n = fileSize(LOG_PREV_PATH) + fileSize(LOG_PATH);
+  size_t n = fileSize(LOG_PREV_PATH);
+  if (logFileOpen) {
+    logFile.flush();  // чтобы размер видел ещё не сброшенные в флэш строки
+    n += logFile.size();
+  } else {
+    n += fileSize(LOG_PATH);
+  }
   xSemaphoreGive(logMutex);
   return n;
 }
@@ -163,8 +184,9 @@ size_t storage_log_size() {
 size_t storage_read_log(char* buf, size_t len, size_t offset) {
   if (!logMutex || !fsReady || !buf || !len) return 0;
   xSemaphoreTake(logMutex, portMAX_DELAY);
+  if (logFileOpen) logFile.flush();  // читатель должен видеть последние строки
   const size_t prevSize = fileSize(LOG_PREV_PATH);
-  const size_t curSize = fileSize(LOG_PATH);
+  const size_t curSize = logFileOpen ? logFile.size() : fileSize(LOG_PATH);
   const char* path = nullptr;
   size_t inFileOffset = 0;
   size_t available = 0;
@@ -194,6 +216,10 @@ size_t storage_read_log(char* buf, size_t len, size_t offset) {
 void storage_clear_log() {
   if (!logMutex || !fsReady) return;
   xSemaphoreTake(logMutex, portMAX_DELAY);
+  if (logFileOpen) {
+    logFile.close();
+    logFileOpen = false;
+  }
   LittleFS.remove(LOG_PATH);
   LittleFS.remove(LOG_PREV_PATH);
   xSemaphoreGive(logMutex);
