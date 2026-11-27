@@ -23,6 +23,7 @@ static bool fsReady = false;
 static const char* NS = "smartdash";
 static const char* KEY_LAST_ELM = "last_elm";
 static const char* KEY_LAST_ELM_TYPE = "last_elm_type";
+static const char* KEY_LAST_ELM_NAME = "last_elm_name";
 static const char* KEY_DRAG_LAST = "drag_last";
 static const char* KEY_DRAG_BEST_OLD = "drag_best";  // совместимость со старой прошивкой
 static const char* KEY_LOG_BOOT = "log_boot";
@@ -64,9 +65,18 @@ void storage_save_last_elm_type(uint8_t type) {
   prefs.putUInt(KEY_LAST_ELM_TYPE, type);
 }
 
+String storage_get_last_elm_name() {
+  return prefs.getString(KEY_LAST_ELM_NAME, "");
+}
+
+void storage_save_last_elm_name(const String &name) {
+  if (name.length()) prefs.putString(KEY_LAST_ELM_NAME, name);
+}
+
 void storage_clear_last_elm() {
   prefs.remove(KEY_LAST_ELM);
   prefs.remove(KEY_LAST_ELM_TYPE);
+  prefs.remove(KEY_LAST_ELM_NAME);
 }
 
 String storage_get_drag_last() { return prefs.getString(KEY_DRAG_LAST, ""); }

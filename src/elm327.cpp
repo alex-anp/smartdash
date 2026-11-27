@@ -8,8 +8,11 @@
  *  - Публичные функции только выставляют volatile-флаги запросов. Рабочая задача
  *    разбирает их в elm_loop(), поэтому вызовы из setup()/UI быстрые и повторно входимые.
  *  - AT-команды работают через неблокирующий конечный автомат: отправить -> ждать
- *    приглашения '>' или таймаута -> разобрать. Пауза 120 мс между командами
- *    устраивает медленные клоны ELM.
+ *    приглашения '>' или таймаута -> разобрать. Приглашение уже означает готовность,
+ *    поэтому дополнительная пауза не нужна; она вырастает только если клон ответил
+ *    по таймауту или без 410C, и медленно уменьшается после серии удачных ответов.
+ *    Быстрые PID запрашиваются одним запросом 010C0D; температура и напряжение
+ *    чередуются отдельно раз в секунду.
  *  - Ответы приходят асинхронно в notifyCB(); rxBuf защищён rxMux, а список
  *    результатов сканирования — foundMux.
  *
@@ -35,7 +38,18 @@ namespace {
 // Для ATZ и 0100 в handleInit() задан ещё больший таймаут.
 constexpr uint32_t SCAN_TIME_MS = 4000;
 constexpr uint32_t CMD_TIMEOUT_MS = 1200;
-constexpr uint32_t POLL_GAP_MS = 120;       // Минимальная пауза между запросами OBD
+// '>' в конце ответа уже говорит, что ELM принял команду и готов к следующей.
+// Старые 120 мс добавлялись к времени ответа и были главным тормозом опроса.
+// Стартуем без паузы; дешёвые клоны иногда выдают '>' раньше, чем сбрасывают
+// приёмник команд, — тогда ответ приходит без 410C или по таймауту, и пауза
+// автоматически удваивается. После длинной серии удачных ответов она снова
+// уменьшается, чтобы не залипать на избыточной задержке после помехи.
+constexpr uint32_t POLL_GAP_MS = 0;
+constexpr uint32_t POLL_GAP_STEP_MS = 8;
+constexpr uint32_t POLL_GAP_MAX_MS = 120;
+constexpr uint8_t POLL_GOOD_TO_RELAX = 12;  // ~2 с удачных ответов перед уменьшением паузы
+constexpr uint32_t SLOW_POLL_MS = 1000;     // 0105 и ATRV по очереди: каждый раз в 2 с
+constexpr uint8_t MULTI_FAIL_LIMIT = 3;     // Столько ответов без 41 0C — и уходим на раздельные PID
 constexpr uint32_t CONNECT_TIMEOUT_MS = 6000;
 constexpr uint32_t STEADY_MS = 300000;      // 5 мин быстрых повторов после старта/потери связи
 constexpr uint32_t PAUSE_MIN = 2000;        // Быстрый повтор в окне STEADY_MS
@@ -45,6 +59,8 @@ constexpr size_t MAX_FOUND = 8;             // Максимум строк в с
 // Объекты GATT принадлежат и используются только BLE-задачей. advDevice — копия
 // найденного устройства в куче: сканер освобождает свой результат после onResult.
 NimBLEAdvertisedDevice* advDevice = nullptr;
+String pendingName;                 // имя устройства, выбранного сканером
+int8_t pendingRssi = -127;           // и его уровень сигнала в момент выбора
 NimBLEClient* client = nullptr;
 NimBLERemoteCharacteristic* chrWrite = nullptr;
 NimBLERemoteCharacteristic* chrNotify = nullptr;
@@ -68,7 +84,8 @@ volatile bool raceMode = false;  // экран замера: опрашивае�
 // Общий снимок, который читает draw_elm_screen() на ядре UI.
 ElmScanEntry found[MAX_FOUND];
 size_t foundCount = 0;
-portMUX_TYPE foundMux = portMUX_INITIALIZER_UNLOCKED;  // Защищает found/foundCount
+ElmConnectedInfo linked;  // данные активного соединения, тот же мьютекс, что и found
+portMUX_TYPE foundMux = portMUX_INITIALIZER_UNLOCKED;  // Защищает found/foundCount/linked
 
 // notifyCB() добавляет байты в BLE-задаче; readCmdResult() их там же и читает,
 // но мьютекс явно фиксирует границу на случай отладки и логирования.
@@ -79,6 +96,21 @@ void setStatus(ElmStatus s) { status = s; }
 void clearFound() {
   portENTER_CRITICAL(&foundMux);
   foundCount = 0;
+  portEXIT_CRITICAL(&foundMux);
+}
+
+// Запоминаем, к чему подключаемся. Вызывается до начала подключения, поэтому
+// при неудаче эти данные просто не попадут на экран (elm_get_connected()
+// проверяет initState == INIT_DONE).
+void rememberLink(const String& addr, uint8_t type, bool typeKnown, const String& name, int8_t rssi) {
+  portENTER_CRITICAL(&foundMux);
+  snprintf(linked.address, sizeof(linked.address), "%s", addr.c_str());
+  snprintf(linked.name, sizeof(linked.name), "%s", name.length() ? name.c_str() : "<unknown>");
+  linked.proto[0] = 0;
+  linked.rssi = rssi;
+  linked.addrType = type;
+  linked.typeKnown = typeKnown;
+  linked.sinceMs = millis();
   portEXIT_CRITICAL(&foundMux);
 }
 
@@ -177,6 +209,12 @@ void scheduleRetry(bool immediate, bool directNext) {
 
 DashData dash;
 uint32_t lastPoll = 0;
+uint32_t pollGap = POLL_GAP_MS;       // адаптивная пауза: растёт только после сбоев
+uint8_t pollGoodStreak = 0;           // подряд удачных ответов перед уменьшением паузы
+uint32_t lastSlowPoll = 0;            // когда последний раз отправляли медленный запрос
+bool slowVoltageNext = false;         // false = следующий медленный запрос 0105, true = ATRV
+bool useMultiPid = true;              // 010C0D даёт обороты и скорость за один ответ
+uint8_t multiFails = 0;               // ответы без 41 0C — сигнал к откату на раздельные запросы
 uint8_t pollLogBudget = 0;  // первые несколько ответов опроса пишем в журнал
 
 enum CmdState { CMD_IDLE, CMD_WAIT };
@@ -203,6 +241,24 @@ void pushData(const DashData& d, bool fromCmd = false) {
     snap.t_ms = now;
   }
   ui_set_data(snap);
+}
+
+// Пауза между запросами нужна только адаптерам, которые выдают '>' раньше, чем
+// готовы принять следующую команду. Такой ответ приходит по таймауту или без
+// нужного PID — тогда быстро уходим на большую задержку. Длинная серия чистых
+// ответов, наоборот, позволяет снова её уменьшить.
+void notePollResult(bool ok) {
+  const uint32_t prev = pollGap;
+  if (ok) {
+    if (pollGap > 0 && ++pollGoodStreak >= POLL_GOOD_TO_RELAX) {
+      pollGoodStreak = 0;
+      pollGap /= 2;
+    }
+  } else {
+    pollGoodStreak = 0;
+    pollGap = min(max(pollGap * 2, (uint32_t)POLL_GAP_STEP_MS), (uint32_t)POLL_GAP_MAX_MS);
+  }
+  if (pollGap != prev) storage_log("POLL gap=%u", pollGap);
 }
 
 // Ответы ELM — куски обычного ASCII с завершающим приглашением '>'. Добавляем их
@@ -259,6 +315,8 @@ class ScanCB : public NimBLEScanCallbacks {
       NimBLEDevice::getScan()->stop();
       if (advDevice) delete advDevice;
       advDevice = new NimBLEAdvertisedDevice(*d);
+      pendingName = name.c_str();
+      pendingRssi = d->getRSSI();
       doConnect = true;
     }
   }
@@ -479,6 +537,7 @@ bool sendCmdAsync(const String& cmd, uint32_t timeoutMs = CMD_TIMEOUT_MS) {
   if (!client || !client->isConnected() || !chrWrite || cmdState != CMD_IDLE) return false;
   portENTER_CRITICAL(&rxMux);
   rxBuf = "";
+  rxBuf.reserve(128);  // ответы короткие: заранее выделяем место, без реаллокаций на каждый байт
   portEXIT_CRITICAL(&rxMux);
   String out = cmd + "\r";
   // WRITE_REQ можно запрашивать только у характеристики с флагом WRITE.
@@ -522,18 +581,22 @@ int hexByte(const String& s, int idx) {
   return (int)v;
 }
 
-// В ответе OBD могут быть пробелы, CRLF и эхо команды. Оставляем только hex-цифры,
-// ищем "41 <PID>" (сервис 0x01 + 0x40), затем читаем байты данных.
-bool parsePid(const String& resp, uint8_t service, uint8_t pid, std::vector<int>& bytes) {
-  bytes.clear();
-  String compact;
+// В ответе OBD могут быть пробелы, CRLF и эхо команды. Оставляем только hex-цифры;
+// для одного запроса с несколькими PID строку уплотняем один раз и ищем в ней
+// каждый pattern (0x40 | service, pid) по отдельности.
+void compactHex(const String& resp, String& compact) {
+  compact = "";
   compact.reserve(resp.length());
   for (size_t i = 0; i < resp.length(); i++) {
     char c = resp[i];
     if ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))
       compact += (char)toupper(c);
   }
-  char pat[5];
+}
+
+bool findPid(const String& compact, uint8_t service, uint8_t pid, std::vector<int>& bytes) {
+  bytes.clear();
+  char pat[6];  // 4 hex-цифры + '\0'; 6 убирает предупреждение format-truncation
   snprintf(pat, sizeof(pat), "%02X%02X", service + 0x40, pid);
   int pos = compact.indexOf(pat);
   if (pos < 0) return false;
@@ -545,6 +608,55 @@ bool parsePid(const String& resp, uint8_t service, uint8_t pid, std::vector<int>
     pos += 2;
   }
   return !bytes.empty();
+}
+
+bool parsePid(const String& resp, uint8_t service, uint8_t pid, std::vector<int>& bytes) {
+  String compact;
+  compactHex(resp, compact);
+  return findPid(compact, service, pid, bytes);
+}
+
+// Разбор ответа с двумя быстрыми PID. В пакетном ответе нет разделителей, поэтому
+// идём последовательно: после заголовка 41 <PID> пропускаем известное число байт
+// этого PID. Иначе байты оборотов, случайно равные 41 0D (~4187 об/мин),
+// принимались бы за заголовок скорости.
+struct FastPids {
+  bool hasRpm = false;
+  bool hasSpeed = false;
+  int rpmRaw = 0;
+  int speed = 0;
+};
+
+FastPids parseFastPids(const String& resp) {
+  String compact;
+  compactHex(resp, compact);
+  FastPids out;
+  int pos = 0;
+  while (pos + 3 < (int)compact.length()) {
+    const int h = compact.indexOf("41", pos);
+    if (h < 0) break;
+    const int pid = hexByte(compact, h + 2);
+    int nbytes = 0;
+    if (pid == 0x0C) nbytes = 2;
+    else if (pid == 0x0D) nbytes = 1;
+    if (nbytes == 0 || h + 4 + 2 * nbytes > (int)compact.length()) {
+      pos = h + 2;  // не наш PID (например, часть CAN-адреса) — ищем дальше
+      continue;
+    }
+    const int b0 = hexByte(compact, h + 4);
+    if (pid == 0x0C) {
+      const int b1 = hexByte(compact, h + 6);
+      if (b0 >= 0 && b1 >= 0) {
+        out.rpmRaw = b0 * 256 + b1;
+        out.hasRpm = true;
+      }
+    } else if (b0 >= 0) {
+      out.speed = b0;
+      out.hasSpeed = true;
+    }
+    pos = h + 4 + 2 * nbytes;
+  }
+  return out;
 }
 
 // Конечный автомат инициализации. Избегает блокирующего ожидания после GATT-подключения:
@@ -567,12 +679,25 @@ constexpr uint32_t protoPidTimeout[] = {6000, 6000, 8000};
 constexpr int PROTO_N = 3;
 uint8_t protoIdx = 0;
 
+// Человекочитаемое название протокола для экрана подключённого ELM.
+const char* protoLabel(int idx) {
+  if (idx == 0) return "KWP fast (ATSP5)";
+  if (idx == 1) return "KWP slow (ATSP4)";
+  return "Auto (ATSP0)";
+}
+
 void startInit() {
   initState = INIT_SEND;
   initPhase = INIT_AT;
   initIdx = 0;
   protoIdx = 0;
   pollLogBudget = 0;
+  pollGap = POLL_GAP_MS;
+  pollGoodStreak = 0;
+  lastSlowPoll = millis();
+  slowVoltageNext = false;
+  useMultiPid = true;
+  multiFails = 0;
   cmdState = CMD_IDLE;
   setStatus(ElmStatus::Initializing);
   storage_log("INIT start addr=%s", pendingAddr.c_str());
@@ -654,10 +779,27 @@ void handleInit() {
     targetFailCount = 0;
     directConnectNext = true;  // следующая потеря связи: сразу к этому MAC
     pollLogBudget = 8;
+    // Первый после инициализации запрос — быстрый 010C0D; медленные подождут 1 с.
+    lastSlowPoll = millis();
+    pollGap = POLL_GAP_MS;
+    pollGoodStreak = 0;
     // Сохраняем только подтверждённый адаптер и тип его адреса — он нужен
     // для прямого reconnect без сканирования после перезагрузки.
     storage_save_last_elm(pendingAddr);
     storage_save_last_elm_type(pendingAddrType);
+    // Данные для экрана active-соединения: протокол выбран после 0100, имя и
+    // адрес уже запомнены на этапе подключения.
+    String nameToSave;
+    portENTER_CRITICAL(&foundMux);
+    if (!linked.address[0]) {
+      snprintf(linked.address, sizeof(linked.address), "%s", pendingAddr.c_str());
+    }
+    snprintf(linked.proto, sizeof(linked.proto), "%s", protoLabel(protoIdx));
+    if (!linked.name[0]) snprintf(linked.name, sizeof(linked.name), "<unknown>");
+    linked.sinceMs = millis();
+    nameToSave = linked.name;
+    portEXIT_CRITICAL(&foundMux);
+    if (nameToSave.length() && nameToSave != "<unknown>") storage_save_last_elm_name(nameToSave);
     setStatus(ElmStatus::Connected);
     dash.connected = true;
     pushData(dash);
@@ -747,7 +889,11 @@ bool startConnect(const NimBLEAddress& addr, const String& addrText, uint8_t typ
 bool connectToAdv() {
   if (!advDevice) return false;
   NimBLEAddress addr = advDevice->getAddress();
-  return startConnect(addr, String(addr.toString().c_str()), addr.getType(), "adv");
+  String addrText = String(addr.toString().c_str());
+  String name = pendingName;
+  if (!name.length() && advDevice->haveName()) name = advDevice->getName().c_str();
+  rememberLink(addrText, addr.getType(), true, name, pendingRssi);
+  return startConnect(addr, addrText, addr.getType(), "adv");
 }
 
 // Прямое подключение без сканирования: адрес и тип адреса сохранены после
@@ -756,38 +902,58 @@ bool connectToAdv() {
 bool connectToSavedAddr() {
   if (targetAddr.length() == 0) return false;
   NimBLEAddress addr(targetAddr.c_str(), targetType);
+  // Advertisement в этой сессии не было — имя берём из NVS, RSSI неизвестен.
+  rememberLink(targetAddr, targetType, targetTypeKnown, storage_get_last_elm_name(), -127);
   return startConnect(addr, targetAddr, targetType, "direct");
 }
 
-// Круговой опрос OBD. cmdPidStep выбирает и команду для отправки, и парсер для
-// предыдущего ответа — отправка и приём используют одну переменную.
+// ATRV возвращает что-то вроде "12.6V\r>". Берём первое десятичное число и
+// отбрасываем неправдоподобные значения (глубокий разряд / всплески зарядки).
+bool parseVoltage(const String& resp, float& volt) {
+  String r = resp;
+  r.replace("V", ""); r.replace("v", ""); r.replace(" ", "");
+  char buf[24] = {0};
+  int j = 0;
+  for (size_t i = 0; i < r.length() && j < 23; i++) {
+    char c = r[i];
+    if ((c >= '0' && c <= '9') || c == '.') buf[j++] = c;
+    else if (j > 0 && buf[j - 1] != '.') break;
+  }
+  const float v = atof(buf);
+  if (v <= 5.0f || v >= 20.0f) return false;
+  volt = v;
+  return true;
+}
+
+// Круговой опрос OBD. Быстрая пара (обороты + скорость) запрашивается одним
+// запросом 010C0D и не ждёт медленных параметров. 0105 и ATRV чередуются раз в
+// SLOW_POLL_MS, то есть каждый параметр обновляется раз в 2 с. Раньше все четыре
+// PID шли по очереди с паузой 120 мс, поэтому обороты и скорость менялись раз в
+// 1–3 с. Если адаптер не понимает несколько PID в одном запросе, после
+// MULTI_FAIL_LIMIT неудач включается старый round-robin.
 void handlePoll() {
   if (!connected || initState != INIT_DONE) return;
-  static const char* cmds[] = {"010C", "010D", "0105", "ATRV"};
+  static const char* legacyCmds[] = {"010C", "010D", "0105", "ATRV"};
   uint32_t now = millis();
 
-  // Режим замера. Один запрос с двумя PID даёт ~8 сэмплов/с вместо ~2:
-  // 0105 и ATRV на это время перестают опрашиваться.
+  // Режим замера. Два быстрых PID одним запросом; температура и напряжение
+  // на это время не опрашиваются, чтобы не терять сэмплы разгона.
   if (raceMode) {
     if (cmdState == CMD_WAIT) {
       String resp;
       if (!readCmdResult(resp)) return;
-      std::vector<int> bytes;
-      // В ответе 410C...410D... оба pattern'а находятся независимо; лишние
-      // байты после нужных не мешают — берём только первые.
-      if (parsePid(resp, 0x01, 0x0C, bytes) && bytes.size() >= 2) {
-        dash.rpm = ((bytes[0] * 256) + bytes[1]) / 4;
-      }
-      if (parsePid(resp, 0x01, 0x0D, bytes) && bytes.size() >= 1) {
-        dash.speed_kmh = bytes[0];
-      }
+      const bool fresh = resp.indexOf('>') >= 0;
+      const FastPids p = parseFastPids(resp);
+      notePollResult(fresh && p.hasRpm);
+      if (p.hasRpm) dash.rpm = p.rpmRaw / 4;
+      if (p.hasSpeed) dash.speed_kmh = p.speed;
       dash.connected = true;
       // При таймауте '>' нет — это не свежий ответ, середину интервала не используем.
-      pushData(dash, resp.indexOf('>') >= 0);
+      pushData(dash, fresh);
       lastPoll = now;
       return;
     }
-    if (now - lastPoll < POLL_GAP_MS) return;
+    if (now - lastPoll < pollGap) return;
     if (!sendCmdAsync("010C0D", 900)) lastPoll = now;
     return;
   }
@@ -795,52 +961,85 @@ void handlePoll() {
   if (cmdState == CMD_WAIT) {
     String resp;
     if (!readCmdResult(resp)) return;
+    const bool fresh = resp.indexOf('>') >= 0;
+    // Признак неготовности адаптера — таймаут или отсутствие нужного PID.
+    // Для медленных запросов проверяем только таймаут: NO DATA у 0105 нормальна.
+    bool good = fresh;
     if (pollLogBudget > 0) {
-      storage_log("POLL %s -> %s", cmds[cmdPidStep % 4], resp.c_str());
+      storage_log("POLL %s -> %s", cmdPending.c_str(), resp.c_str());
       pollLogBudget--;
     }
+
     std::vector<int> bytes;
-    switch (cmdPidStep % 4) {
-      case 0:
-        // PID 010C: RPM = ((A * 256) + B) / 4, разрешение 0.25 об/мин.
-        if (parsePid(resp, 0x01, 0x0C, bytes) && bytes.size() >= 2) dash.rpm = ((bytes[0] * 256) + bytes[1]) / 4;
-        break;
-      case 1:
-        if (parsePid(resp, 0x01, 0x0D, bytes) && bytes.size() >= 1) dash.speed_kmh = bytes[0];
-        break;
-      case 2:
-        // PID 0105: температура охлаждающей жидкости = A - 40 °C.
-        if (parsePid(resp, 0x01, 0x05, bytes) && bytes.size() >= 1) dash.coolant_c = bytes[0] - 40;
-        break;
-      case 3: {
-        // ATRV возвращает что-то вроде "12.6V\r>". Берём первое десятичное число
-        // и отбрасываем неправдоподобные значения (глубокий разряд / всплески зарядки).
-        String r = resp;
-        r.replace("V", ""); r.replace("v", ""); r.replace(" ", "");
-        char buf[24] = {0}; int j = 0;
-        for (size_t i = 0; i < r.length() && j < 23; i++) {
-          char c = r[i];
-          if ((c >= '0' && c <= '9') || c == '.') { buf[j++] = c; }
-          else if (j > 0 && buf[j - 1] != '.') break;
+    if (useMultiPid) {
+      // Быстрая пара: температура и напряжение сюда уже не попадают.
+      if (cmdPending == "010C0D") {
+        const FastPids p = parseFastPids(resp);
+        if (p.hasRpm) dash.rpm = p.rpmRaw / 4;
+        if (p.hasSpeed) dash.speed_kmh = p.speed;
+        notePollResult(good && p.hasRpm);
+        // Откат на раздельные PID — только когда пауза уже максимальна: иначе
+        // missing 410C может быть просто признаком слишком короткой паузы.
+        if (fresh && !p.hasRpm && pollGap >= POLL_GAP_MAX_MS) {
+          if (++multiFails >= MULTI_FAIL_LIMIT) {
+            useMultiPid = false;
+            cmdPidStep = 0;
+            storage_log("POLL multi-PID unsupported -> legacy 010C/010D/0105/ATRV");
+          }
+        } else if (p.hasRpm) {
+          multiFails = 0;
         }
-        float v = atof(buf);
-        if (v > 5.0f && v < 20.0f) dash.volt = v;
-        break;
+      } else if (cmdPending == "0105") {
+        if (parsePid(resp, 0x01, 0x05, bytes) && bytes.size() >= 1) dash.coolant_c = bytes[0] - 40;
+      } else if (cmdPending == "ATRV") {
+        float v;
+        if (parseVoltage(resp, v)) dash.volt = v;
       }
+    } else {
+      // Резервный путь для адаптеров без поддержки нескольких PID.
+      switch (cmdPidStep % 4) {
+        case 0:
+          if (parsePid(resp, 0x01, 0x0C, bytes) && bytes.size() >= 2)
+            dash.rpm = (bytes[0] * 256 + bytes[1]) / 4;
+          break;
+        case 1:
+          if (parsePid(resp, 0x01, 0x0D, bytes) && bytes.size() >= 1) dash.speed_kmh = bytes[0];
+          break;
+        case 2:
+          if (parsePid(resp, 0x01, 0x05, bytes) && bytes.size() >= 1) dash.coolant_c = bytes[0] - 40;
+          break;
+        case 3: {
+          float v;
+          if (parseVoltage(resp, v)) dash.volt = v;
+          break;
+        }
+      }
+      cmdPidStep++;
     }
+    if (cmdPending != "010C0D") notePollResult(good);
+
     dash.connected = true;
-    pushData(dash, resp.indexOf('>') >= 0);
-    cmdPidStep++;
+    pushData(dash, fresh);
     lastPoll = now;
     return;
   }
 
-  if (now - lastPoll < POLL_GAP_MS) return;
-  uint32_t tmos[] = {900, 900, 900, 900};
-  uint8_t s = cmdPidStep % 4;
-  if (!sendCmdAsync(cmds[s], tmos[s])) {
-    lastPoll = now; // чтобы не было частого повтора
+  if (now - lastPoll < pollGap) return;
+  const char* cmd;
+  if (useMultiPid) {
+    // Медленные параметры не вытесняют быстрые: между ними хотя бы секунда.
+    // Температура и напряжение чередуются, поэтому каждый приходит раз в 2 с.
+    if (now - lastSlowPoll >= SLOW_POLL_MS) {
+      cmd = slowVoltageNext ? "ATRV" : "0105";
+      slowVoltageNext = !slowVoltageNext;
+      lastSlowPoll = now;
+    } else {
+      cmd = "010C0D";
+    }
+  } else {
+    cmd = legacyCmds[cmdPidStep % 4];
   }
+  if (!sendCmdAsync(cmd, 900)) lastPoll = now;  // чтобы не было частого повтора
 }
 
 }  // namespace
@@ -889,6 +1088,8 @@ void elm_start_scan() {
   directConnectNext = false;
   requestDirectConnect = false;
   clearFound();
+  pendingName = "";
+  pendingRssi = -127;
   setStatus(ElmStatus::Scanning);
   if (client && client->isConnected()) client->disconnect();
   SD_LOGln("[ELM] scan start");
@@ -1029,6 +1230,7 @@ void elm_set_race_mode(bool enabled) {
   raceMode = enabled;
   portENTER_CRITICAL(&rxMux);
   rxBuf = "";
+  rxBuf.reserve(128);
   portEXIT_CRITICAL(&rxMux);
   cmdState = CMD_IDLE;
   cmdPidStep = 0;
@@ -1049,4 +1251,14 @@ size_t elm_get_found(ElmScanEntry* out, size_t max) {
   }
   portEXIT_CRITICAL(&foundMux);
   return n;
+}
+
+// Информация показывается только после завершённой AT-инициализации: во время
+// поиска/подключения экран продолжает выводить список найденных устройств.
+bool elm_get_connected(ElmConnectedInfo& out) {
+  if (!connected || initState != INIT_DONE) return false;
+  portENTER_CRITICAL(&foundMux);
+  out = linked;
+  portEXIT_CRITICAL(&foundMux);
+  return true;
 }

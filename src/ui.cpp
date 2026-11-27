@@ -41,10 +41,35 @@ constexpr int RPM_SCALE_R_IN = 138;
 constexpr int RPM_SCALE_TICK_PX = 2;
 constexpr int RPM_SCALE_LABEL_R = 122;
 
+// Блок скорости. "km/h" рисуется один раз в статике; при изменении значения
+// перекрашиваем только прямоугольник цифр, а не всю центральную область.
+constexpr int SPEED_DIGIT_W = 56;
+constexpr int SPEED_DIGIT_H = 96;
+constexpr int SPEED_SEG_T = 10;
+constexpr int SPEED_SPACING = 14;
+constexpr int SPEED_Y0 = SCREEN_CENTER_Y - 56;
+constexpr int SPEED_CLEAR_X = 110;
+constexpr int SPEED_CLEAR_Y = 118;
+constexpr int SPEED_CLEAR_W = 140;
+constexpr int SPEED_CLEAR_H = 104;  // до y=221; подпись km/h начинается с y=225
+
+constexpr int BOTTOM_X = 30;
+constexpr int BOTTOM_Y = 278;
+constexpr int BOTTOM_W = 300;
+constexpr int BOTTOM_H = 60;
+
 // Полноэкранный back-буфер. PSRAM разгружает внутреннюю ОЗУ от кадра ~252 КБ;
 // pushSprite() — единственная прямая запись в панель за кадр.
 LGFX_Sprite canvas(&display_get());
 bool canvas_ok = false;
+
+// Отложенные области спрайта, которые нужно вывести на панель. Обычно их 1–3:
+// дуга RPM, блок скорости, нижняя строка. Полный кадр — только при смене экрана.
+constexpr uint8_t DIRTY_RECT_MAX = 8;
+struct DirtyRect { int16_t x, y, w, h; };
+DirtyRect dirtyRects[DIRTY_RECT_MAX];
+uint8_t dirtyRectCount = 0;
+bool needFullFlush = false;
 
 DashData cur;       // Последние значения (анимация или ELM), только UI-задача
 DashData drawn;     // Что сейчас нарисовано в спрайте
@@ -119,10 +144,67 @@ float rpm_angle(int rpm) {
 // Цель отрисовки: спрайт, если он создан; иначе панель напрямую.
 lgfx::LGFX_Device& g() { return canvas_ok ? (lgfx::LGFX_Device&)canvas : display_get(); }
 
-// Атомарный вывод кадра. Если спрайт не создан — ничего не делаем.
+// Полный вывод кадра: используется при смене экрана и после перерисовки статики.
+// Все отложенные «грязные» прямоугольники при этом уже не нужны.
 void flush() {
+  dirtyRectCount = 0;
+  needFullFlush = false;
   if (!canvas_ok) return;
+  display_get().clearClipRect();  // полный кадр не должен попасть под старый clip
   canvas.pushSprite(0, 0);
+}
+
+// Частичный вывод. Прямоугольник задаётся в координатах спрайта; clipRect на
+// панели заставляет pushSprite() отдать только его, а не весь кадр 360×360.
+// За счёт этого одно изменение оборотов передаёт не 252 КБ, а обычно 1–5 КБ.
+void addDirtyRect(int x, int y, int w, int h) {
+  if (w <= 0 || h <= 0) return;
+  if (x < 0) { w += x; x = 0; }
+  if (y < 0) { h += y; y = 0; }
+  if (x + w > SCREEN_WIDTH) w = SCREEN_WIDTH - x;
+  if (y + h > SCREEN_HEIGHT) h = SCREEN_HEIGHT - y;
+  if (w <= 0 || h <= 0) return;
+
+  // Слипаем пересекающиеся области: их всё равно нельзя вывести независимо
+  // без риска затереть соседний виджет.
+  for (uint8_t i = 0; i < dirtyRectCount; i++) {
+    DirtyRect& r = dirtyRects[i];
+    const int rx = r.x, ry = r.y, rw = r.w, rh = r.h;
+    const int x1 = max(rx, x);
+    const int y1 = max(ry, y);
+    const int x2 = min(rx + rw, x + w);
+    const int y2 = min(ry + rh, y + h);
+    if (x1 < x2 && y1 < y2) {
+      const int nx = min(rx, x);
+      const int ny = min(ry, y);
+      r.w = max(rx + rw, x + w) - nx;
+      r.h = max(ry + rh, y + h) - ny;
+      r.x = nx;
+      r.y = ny;
+      return;
+    }
+  }
+  if (dirtyRectCount < DIRTY_RECT_MAX) {
+    dirtyRects[dirtyRectCount++] = {(int16_t)x, (int16_t)y, (int16_t)w, (int16_t)h};
+  } else {
+    // Хуже всего — вывести один кадр целиком, но никогда не теряем обновление.
+    needFullFlush = true;
+  }
+}
+
+void flushDirty() {
+  if (!canvas_ok) { dirtyRectCount = 0; needFullFlush = false; return; }
+  if (needFullFlush) { flush(); return; }
+  if (dirtyRectCount == 0) return;
+
+  auto& disp = display_get();
+  for (uint8_t i = 0; i < dirtyRectCount; i++) {
+    const DirtyRect& r = dirtyRects[i];
+    disp.setClipRect(r.x, r.y, r.w, r.h);
+    canvas.pushSprite(&disp, 0, 0);
+  }
+  disp.clearClipRect();
+  dirtyRectCount = 0;
 }
 
 // Три точки по центру cx. Активна ровно одна — простая анимация «работает»
@@ -138,12 +220,33 @@ bool in_rect(int32_t x, int32_t y, int x0, int y0, int x1, int y1) {
   return x >= x0 && x <= x1 && y >= y0 && y <= y1;
 }
 
-// Незакрашенная часть тахометра. Вызывается и из draw_static(), и перед каждой
-// перерисовкой RPM, потому что fillArc() затирает предыдущую цветную дугу.
+// Ограничивающий прямоугольник участка дуги. Грубая оценка по наружному радиусу
+// с шагом 2° и запасом 2 px: для небольшой дельты RPM это обычно 10–30 px.
+void markArcDirty(float fromAngle, float toAngle) {
+  if (toAngle < fromAngle) { const float t = fromAngle; fromAngle = toAngle; toAngle = t; }
+  int minX = SCREEN_WIDTH, minY = SCREEN_HEIGHT, maxX = 0, maxY = 0;
+  auto addPoint = [&](float deg) {
+    const float a = deg * (float)M_PI / 180.0f;
+    const int x = SCREEN_CENTER_X + (int)lroundf(cosf(a) * RPM_ARC_R_OUT);
+    const int y = SCREEN_CENTER_Y + (int)lroundf(sinf(a) * RPM_ARC_R_OUT);
+    if (x < minX) minX = x;
+    if (y < minY) minY = y;
+    if (x > maxX) maxX = x;
+    if (y > maxY) maxY = y;
+  };
+  addPoint(fromAngle);
+  for (float a = ceilf(fromAngle / 2.0f) * 2.0f; a < toAngle; a += 2.0f) addPoint(a);
+  addPoint(toAngle);
+  addDirtyRect(minX - 2, minY - 2, maxX - minX + 5, maxY - minY + 5);
+}
+
+// Незакрашенная часть тахометра. Рисуется только в статике и при полном
+// обновлении дуги; при обычном изменении RPM стирается лишь изменившийся кусок.
 void draw_arc_bg() {
   auto& d = g();
   d.fillArc(SCREEN_CENTER_X, SCREEN_CENTER_Y, RPM_ARC_R_OUT, RPM_ARC_R_IN, RPM_ARC_START,
             RPM_ARC_START + RPM_ARC_SWEEP, RPM_ARC_BG_COLOR);
+  markArcDirty(RPM_ARC_START, RPM_ARC_START + RPM_ARC_SWEEP);
 }
 
 void draw_rpm_scale() {
@@ -187,28 +290,51 @@ void draw_rpm_scale() {
   }
 }
 
-// Закрашиваем сплошной индикатор от нуля до текущих RPM. Зоны рисуются по очереди;
-// каждый сегмент fillArc() ограничен интервалом [zone.from, zone.to].
+// Внешние зоны индикатора. Цвета из config.h: зелёный до красной зоны,
+// оранжевый до 10k, красный до 12k.
+struct RpmZone { int from; int to; uint16_t color; };
+static const RpmZone rpmZones[] = {
+  {0, RPM_REDLINE, TFT_GREEN},
+  {RPM_REDLINE, RPM_REDLINE + 2000, TFT_ORANGE},
+  {RPM_REDLINE + 2000, RPM_MAX, TFT_RED},
+};
+
+// Залить один интервал дуги и пометить только его границы как грязные.
+void fillArcRange(int rpmFrom, int rpmTo, uint16_t color) {
+  rpmFrom = constrain(rpmFrom, 0, RPM_MAX);
+  rpmTo = constrain(rpmTo, 0, RPM_MAX);
+  if (rpmFrom >= rpmTo) return;
+  const float a0 = rpm_angle(rpmFrom);
+  const float a1 = rpm_angle(rpmTo);
+  g().fillArc(SCREEN_CENTER_X, SCREEN_CENTER_Y, RPM_ARC_R_OUT, RPM_ARC_R_IN, a0, a1, color);
+  markArcDirty(a0, a1);
+}
+
+// Цветной участок [from, to] с разбивкой по зонам.
+void drawRpmColorRange(int from, int to) {
+  for (const auto& z : rpmZones) {
+    const int a = max(from, z.from);
+    const int b = min(to, z.to);
+    if (a < b) fillArcRange(a, b, z.color);
+  }
+}
+
+// Полная перерисовка дуги (после смены экрана/статики).
 void draw_rpm(int rpm) {
   rpm = constrain(rpm, 0, RPM_MAX);
-  auto& d = g();
   draw_arc_bg();
-  if (rpm > 0) {
-    // Цвета из config.h: зелёный до красной зоны, оранжевый до 10k, красный до 12k.
-    struct Zone { int from; int to; uint16_t color; };
-    static const Zone zones[] = {
-      {0, RPM_REDLINE, TFT_GREEN},
-      {RPM_REDLINE, RPM_REDLINE + 2000, TFT_ORANGE},
-      {RPM_REDLINE + 2000, RPM_MAX, TFT_RED},
-    };
-    for (const auto& z : zones) {
-      if (rpm <= z.from) break;
-      int segEnd = rpm < z.to ? rpm : z.to;
-      d.fillArc(SCREEN_CENTER_X, SCREEN_CENTER_Y, RPM_ARC_R_OUT, RPM_ARC_R_IN,
-                rpm_angle(z.from), rpm_angle(segEnd), z.color);
-      if (rpm <= z.to) break;
-    }
-  }
+  drawRpmColorRange(0, rpm);
+}
+
+// Инкрементальное обновление: при росте заливаем только новый участок,
+// при падении — стираем только убранный. Вместо ~(352×264) пикселей обычно
+// перерисовываются единицы градусов дуги.
+void update_rpm(int oldRpm, int newRpm) {
+  oldRpm = constrain(oldRpm, 0, RPM_MAX);
+  newRpm = constrain(newRpm, 0, RPM_MAX);
+  if (newRpm == oldRpm) return;
+  if (newRpm < oldRpm) fillArcRange(newRpm, oldRpm, RPM_ARC_BG_COLOR);
+  else drawRpmColorRange(oldRpm, newRpm);
 }
 
 // Семисегментная цифра из скруглённых прямоугольников. Битовые маски — классическая
@@ -230,40 +356,34 @@ void draw_seg_digit(lgfx::LGFX_Device& d, int x, int y, int w, int h, int t, int
   d.fillRoundRect(x + t + gap, mid, w - 2 * t - 2 * gap, t, r, col(m & 0x40));               // G
 }
 
-// Блок скорости. Сначала перекрашиваем чёрную область, чтобы старые сегменты
-// исчезали при уменьшении значения (например, 99 -> 1). Значения 0..9 намеренно
-// рисуются одной цифрой по центру.
+// Блок скорости. Подпись "km/h" рисуется один раз в draw_static(), поэтому здесь
+// перекрашивается только прямоугольник цифр. Значения 0..9 намеренно рисуются
+// одной цифрой по центру.
 void draw_speed(int speed) {
   auto& d = g();
   speed = constrain(speed, 0, 99);
 
-  const int digitW = 56;
-  const int digitH = 96;
-  const int segT = 10;
-  const int spacing = 14;
-  const int totalW = digitW * 2 + spacing;
+  const int totalW = SPEED_DIGIT_W * 2 + SPEED_SPACING;
   const int x0 = SCREEN_CENTER_X - totalW / 2;
-  const int y0 = SCREEN_CENTER_Y - 56;
 
-  d.fillRect(SCREEN_CENTER_X - 90, y0 - 8, 180, digitH + 44, TFT_BLACK);
+  d.fillRect(SPEED_CLEAR_X, SPEED_CLEAR_Y, SPEED_CLEAR_W, SPEED_CLEAR_H, TFT_BLACK);
+  addDirtyRect(SPEED_CLEAR_X, SPEED_CLEAR_Y, SPEED_CLEAR_W, SPEED_CLEAR_H);
 
-  uint16_t on = 0xFFFF;
-  uint16_t off = 0x1082;
-  int d1 = speed / 10;
-  int d2 = speed % 10;
+  const uint16_t on = 0xFFFF;
+  const uint16_t off = 0x1082;
+  const int d1 = speed / 10;
+  const int d2 = speed % 10;
 
   if (d1 == 0) {
     // Оставляем 0..9 (особенно ноль после анимации) явно по центру, а не с
     // пустым разрядом десятков и смещённой влево единственной цифрой.
-    draw_seg_digit(d, SCREEN_CENTER_X - digitW / 2, y0, digitW, digitH, segT, d2, on, off);
+    draw_seg_digit(d, SCREEN_CENTER_X - SPEED_DIGIT_W / 2, SPEED_Y0, SPEED_DIGIT_W,
+                   SPEED_DIGIT_H, SPEED_SEG_T, d2, on, off);
   } else {
-    draw_seg_digit(d, x0, y0, digitW, digitH, segT, d1, on, off);
-    draw_seg_digit(d, x0 + digitW + spacing, y0, digitW, digitH, segT, d2, on, off);
+    draw_seg_digit(d, x0, SPEED_Y0, SPEED_DIGIT_W, SPEED_DIGIT_H, SPEED_SEG_T, d1, on, off);
+    draw_seg_digit(d, x0 + SPEED_DIGIT_W + SPEED_SPACING, SPEED_Y0, SPEED_DIGIT_W,
+                   SPEED_DIGIT_H, SPEED_SEG_T, d2, on, off);
   }
-
-  d.setTextDatum(middle_center);
-  d.setTextColor(0xC618, TFT_BLACK);
-  d.drawString("km/h", SCREEN_CENTER_X, y0 + digitH + 18, 4);
 }
 
 // Маленькие контурные иконки рядом с числами в нижней части циферблата.
@@ -290,7 +410,8 @@ void draw_batt_icon(int x, int y, uint16_t c) {
 // Цвета по фиксированным порогам, чтобы состояние читалось без цифр.
 void draw_bottom(int coolant_c, float volt, bool connected) {
   auto& d = g();
-  d.fillRect(30, 278, 300, 60, TFT_BLACK);
+  d.fillRect(BOTTOM_X, BOTTOM_Y, BOTTOM_W, BOTTOM_H, TFT_BLACK);
+  addDirtyRect(BOTTOM_X, BOTTOM_Y, BOTTOM_W, BOTTOM_H);
   uint16_t tColor = 0xC618;
   if (coolant_c >= 0) {
     if (coolant_c < 60) tColor = TFT_CYAN;
@@ -335,15 +456,29 @@ void draw_bottom(int coolant_c, float volt, bool connected) {
 }
 
 // Однократный фон: чёрная заливка, тонкая внешняя окружность, не закрашенная дуга
-// RPM и внутренняя шкала. Динамические виджеты накладывает ui_show_dash().
+// RPM, внутренняя шкала и подпись скорости. Динамические виджеты накладывает
+// ui_show_dash(). Статику нужно вывести целиком — partial flush здесь не годится.
 void draw_static() {
   auto& d = g();
   d.fillScreen(TFT_BLACK);
   d.drawCircle(SCREEN_CENTER_X, SCREEN_CENTER_Y, 179, 0x1082);
   draw_arc_bg();
   draw_rpm_scale();
+  d.setTextDatum(middle_center);
+  d.setTextColor(0xC618, TFT_BLACK);
+  d.drawString("km/h", SCREEN_CENTER_X, SPEED_Y0 + SPEED_DIGIT_H + 18, 4);
+
+  // После полной перерисовки кэш виджетов недействителен: RPM рисуем целиком,
+  // остальные — обычным сравнением с sentinel-значениями.
+  drawn.rpm = -999;
+  drawn.speed_kmh = -999;
+  drawn.coolant_c = -999;
+  drawn.volt = -999;
+  drawn.connected = !cur.connected;
+  drawn_dot_phase = -1;
   static_drawn = true;
   dirty = true;
+  needFullFlush = true;
 }
 
 // Человекочитаемая строка статуса для ELM Connect. Если задан конкретный адрес,
@@ -359,8 +494,44 @@ String elm_status_text(ElmStatus s) {
   return "";
 }
 
-// Полноэкранный экран подключения. Весь контент держится внутри вписанной окружности;
-// показывается до пяти результатов BLE с цветом по уровню RSSI.
+// Сведения об уже подключённом адаптере. Вместо списка сканирования показываем
+// имя, адрес, тип адреса, протокол и время соединения; searching-индикатор не нужен.
+void draw_connected_info(lgfx::LGFX_Device& d, const ElmConnectedInfo& info) {
+  char buf[64];
+  d.setTextDatum(middle_center);
+
+  d.setTextColor(0x8410, TFT_BLACK);
+  d.drawString("NAME", SCREEN_CENTER_X, 148, 1);
+  d.setTextColor(TFT_WHITE, TFT_BLACK);
+  snprintf(buf, sizeof(buf), "%.22s", info.name);
+  d.drawString(buf, SCREEN_CENTER_X, 166, 2);
+
+  d.setTextColor(0x8410, TFT_BLACK);
+  d.drawString("ADDRESS", SCREEN_CENTER_X, 188, 1);
+  d.setTextColor(TFT_WHITE, TFT_BLACK);
+  d.drawString(info.address, SCREEN_CENTER_X, 206, 2);
+
+  d.setTextColor(0x8410, TFT_BLACK);
+  d.drawString("PROTOCOL", SCREEN_CENTER_X, 226, 1);
+  d.setTextColor(TFT_GREEN, TFT_BLACK);
+  d.drawString(info.proto, SCREEN_CENTER_X, 244, 2);
+
+  const char* type = !info.typeKnown ? "?" : (info.addrType == 0 ? "Public" : "Random");
+  const uint32_t upS = (millis() - info.sinceMs) / 1000;
+  if (info.rssi > -127) {
+    snprintf(buf, sizeof(buf), "%s  %d dBm  UP %u:%02u", type, info.rssi,
+             (unsigned)(upS / 60), (unsigned)(upS % 60));
+  } else {
+    snprintf(buf, sizeof(buf), "%s  RSSI --  UP %u:%02u", type,
+             (unsigned)(upS / 60), (unsigned)(upS % 60));
+  }
+  d.setTextColor(0xC618, TFT_BLACK);
+  d.drawString(buf, SCREEN_CENTER_X, 266, 1);
+}
+
+// Полноэкранный экран подключения. Весь контент держится внутри вписанной окружности.
+// До подключения — статус и до пяти результатов BLE с цветом по уровню RSSI.
+// После подключения — данные активного ELM; новый поиск только по тапу Scan.
 void draw_elm_screen() {
   auto& d = g();
   ElmStatus st = elm_status();
@@ -373,11 +544,14 @@ void draw_elm_screen() {
   d.setTextColor(TFT_WHITE, TFT_BLACK);
   d.drawString("ELM Connect", SCREEN_CENTER_X, 38, 4);
 
-  uint16_t statusColor = (st == ElmStatus::Connected) ? TFT_GREEN :
+  ElmConnectedInfo info;
+  const bool linked = elm_get_connected(info);
+  uint16_t statusColor = linked ? TFT_GREEN :
                          (st == ElmStatus::Idle) ? 0x8410 : TFT_ORANGE;
   d.setTextColor(statusColor, TFT_BLACK);
-  d.drawString(elm_status_text(st), SCREEN_CENTER_X, 74, 2);
-  if (st == ElmStatus::Scanning || st == ElmStatus::Connecting || st == ElmStatus::Initializing) {
+  d.drawString(linked ? "ELM CONNECTED" : elm_status_text(st), SCREEN_CENTER_X, 74, 2);
+  if (!linked && (st == ElmStatus::Scanning || st == ElmStatus::Connecting ||
+                  st == ElmStatus::Initializing)) {
     draw_status_dots(d, 300, 74, statusColor, 0x4208, dot_phase);
   }
 
@@ -387,37 +561,41 @@ void draw_elm_screen() {
 
   d.drawFastHLine(40, 128, 280, 0x2104);
 
-  ElmScanEntry entries[5];
-  size_t n = elm_get_found(entries, 5);
-  if (n == 0) {
-    d.setTextColor(0x8410, TFT_BLACK);
-    d.drawString("No BLE devices yet", SCREEN_CENTER_X, 190, 2);
-    d.drawString("Keep ELM nearby", SCREEN_CENTER_X, 214, 2);
+  if (linked) {
+    draw_connected_info(d, info);
   } else {
-    for (size_t i = 0; i < n; i++) {
-      const ElmScanEntry& e = entries[i];
-      int y0 = 134 + (int)i * 30;
-      uint16_t bg = e.compatible ? 0x0420 : 0x1082;
-      d.fillRoundRect(40, y0, 280, 28, 5, bg);
+    ElmScanEntry entries[5];
+    size_t n = elm_get_found(entries, 5);
+    if (n == 0) {
+      d.setTextColor(0x8410, TFT_BLACK);
+      d.drawString("No BLE devices yet", SCREEN_CENTER_X, 190, 2);
+      d.drawString("Keep ELM nearby", SCREEN_CENTER_X, 214, 2);
+    } else {
+      for (size_t i = 0; i < n; i++) {
+        const ElmScanEntry& e = entries[i];
+        int y0 = 134 + (int)i * 30;
+        uint16_t bg = e.compatible ? 0x0420 : 0x1082;
+        d.fillRoundRect(40, y0, 280, 28, 5, bg);
 
-      char name[24];
-      snprintf(name, sizeof(name), "%s", e.name);
-      d.setTextDatum(middle_left);
-      d.setTextColor(TFT_WHITE, bg);
-      d.drawString(name, 50, y0 + 9, 2);
+        char name[24];
+        snprintf(name, sizeof(name), "%s", e.name);
+        d.setTextDatum(middle_left);
+        d.setTextColor(TFT_WHITE, bg);
+        d.drawString(name, 50, y0 + 9, 2);
 
-      // Короткий MAC (последние 8 символов) меньшим шрифтом на второй строке.
-      const char* shortAddr = e.address;
-      size_t len = strlen(shortAddr);
-      if (len > 8) shortAddr += len - 8;
-      d.setTextColor(0x8410, bg);
-      d.drawString(shortAddr, 50, y0 + 21, 1);
+        // Короткий MAC (последние 8 символов) меньшим шрифтом на второй строке.
+        const char* shortAddr = e.address;
+        size_t len = strlen(shortAddr);
+        if (len > 8) shortAddr += len - 8;
+        d.setTextColor(0x8410, bg);
+        d.drawString(shortAddr, 50, y0 + 21, 1);
 
-      char rssi[12];
-      snprintf(rssi, sizeof(rssi), "%d dBm", e.rssi);
-      d.setTextDatum(middle_right);
-      d.setTextColor(e.rssi > -70 ? TFT_GREEN : TFT_ORANGE, bg);
-      d.drawString(rssi, 310, y0 + 14, 2);
+        char rssi[12];
+        snprintf(rssi, sizeof(rssi), "%d dBm", e.rssi);
+        d.setTextDatum(middle_right);
+        d.setTextColor(e.rssi > -70 ? TFT_GREEN : TFT_ORANGE, bg);
+        d.drawString(rssi, 310, y0 + 14, 2);
+      }
     }
   }
 
@@ -425,7 +603,7 @@ void draw_elm_screen() {
 
   d.setTextDatum(middle_center);
   d.setTextColor(0x8410, TFT_BLACK);
-  d.drawString(st == ElmStatus::Connected ? "ELM connected" : "Tap device to connect",
+  d.drawString(linked ? "TAP SCAN TO RECONNECT" : "Tap device to connect",
                SCREEN_CENTER_X, 308, 1);
   d.drawString("SWIPE DOWN - BACK", SCREEN_CENTER_X, 322, 1);
 
@@ -564,6 +742,9 @@ void handle_tap(int32_t x, int32_t y) {
     elm_screen_dirty = true;
     return;
   }
+  // Подключённый адаптер показывается как информация, а не как список: тапы
+  // по области списка игнорируются. Для смены устройства есть кнопка Scan.
+  if (elm_is_connected()) return;
   if (y >= 134 && y <= 284 && x >= 40 && x <= 320) {
     ElmScanEntry entries[5];
     size_t n = elm_get_found(entries, 5);
@@ -721,6 +902,8 @@ void ui_init() {
   drawn.connected = !cur.connected;
   static_drawn = false;
   dirty = true;
+  dirtyRectCount = 0;
+  needFullFlush = false;
   last_sweep_ms = millis();
   sweep_step = 0;
   sweep_done = false;
@@ -790,29 +973,33 @@ void ui_hide_elm_connect() { switchScreen(Screen::Dash); }
 
 // Рендер по «грязным» виджетам. У каждого виджета своё сравнение с кэшем, чтобы
 // при изменении только напряжения или точки статуса не перерисовывать дугу RPM.
+// Готовый кадр уходит на панель не целиком, а только изменившимися кусками.
 void ui_show_dash() {
   if (!static_drawn) draw_static();
 
-  if (!dirty) return;
-  if (drawn.rpm != cur.rpm) {
-    draw_rpm(cur.rpm);
-    drawn.rpm = cur.rpm;
+  if (dirty) {
+    if (drawn.rpm != cur.rpm) {
+      // Sentinel означает свежую статику: дугу нужно перерисовать целиком.
+      if (drawn.rpm < 0) draw_rpm(cur.rpm);
+      else update_rpm(drawn.rpm, cur.rpm);
+      drawn.rpm = cur.rpm;
+    }
+    if (drawn.speed_kmh != cur.speed_kmh) {
+      draw_speed(cur.speed_kmh);
+      drawn.speed_kmh = cur.speed_kmh;
+    }
+    int phase = cur.connected ? -1 : dot_phase;
+    if (drawn.coolant_c != cur.coolant_c || fabsf(drawn.volt - cur.volt) > 0.05f ||
+        drawn.connected != cur.connected || drawn_dot_phase != phase) {
+      draw_bottom(cur.coolant_c, cur.volt, cur.connected);
+      drawn.coolant_c = cur.coolant_c;
+      drawn.volt = cur.volt;
+      drawn.connected = cur.connected;
+      drawn_dot_phase = phase;
+    }
+    dirty = false;
   }
-  if (drawn.speed_kmh != cur.speed_kmh) {
-    draw_speed(cur.speed_kmh);
-    drawn.speed_kmh = cur.speed_kmh;
-  }
-  int phase = cur.connected ? -1 : dot_phase;
-  if (drawn.coolant_c != cur.coolant_c || fabsf(drawn.volt - cur.volt) > 0.05f ||
-      drawn.connected != cur.connected || drawn_dot_phase != phase) {
-    draw_bottom(cur.coolant_c, cur.volt, cur.connected);
-    drawn.coolant_c = cur.coolant_c;
-    drawn.volt = cur.volt;
-    drawn.connected = cur.connected;
-    drawn_dot_phase = phase;
-  }
-  dirty = false;
-  flush();
+  flushDirty();
 }
 
 // Основной тик UI. Порядок важен: сначала ввод может сменить экран, затем

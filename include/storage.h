@@ -13,6 +13,10 @@ void storage_save_last_elm(const String &addr);
 // Тип BLE-адреса: -1 = не сохранён (старая прошивка), 0 = public, 1 = random.
 int storage_get_last_elm_type();
 void storage_save_last_elm_type(uint8_t type);
+// Имя успешно подключённого адаптера: нужно для экрана информации о ELM после
+// перезагрузки, когда подключение идёт прямо по сохранённому MAC без сканирования.
+String storage_get_last_elm_name();
+void storage_save_last_elm_name(const String &name);
 void storage_clear_last_elm();
 
 // Последний и лучший замер разгона. Формат строки задаёт dragrace.cpp:

@@ -29,8 +29,21 @@ void elm_connect(const String& addr);       // Сохранить адрес и 
 bool elm_is_connected();                    // true только после завершения AT-инициализации
 void elm_set_race_mode(bool enabled);       // режим замера: только 010C0D с таймштампом
 
-// Состояние и найденные устройства для экрана подключения ELM.
+// Информация об уже подключённом адаптере для экрана ELM Connect. rssi = -127,
+// если подключение было прямое по сохранённому MAC и advertisement не принимался.
+struct ElmConnectedInfo {
+  char name[40];
+  char address[24];
+  char proto[24];     // например "KWP fast (ATSP5)"
+  int8_t rssi;
+  uint8_t addrType;   // BLE_ADDR_PUBLIC / BLE_ADDR_RANDOM
+  bool typeKnown;
+  uint32_t sinceMs;   // millis() завершения AT-инициализации
+};
+
+// Состояние, найденные устройства и данные активного соединения для экрана ELM Connect.
 ElmStatus elm_status();
 size_t elm_get_found(ElmScanEntry* out, size_t max);
+bool elm_get_connected(ElmConnectedInfo& out);
 
 #endif
