@@ -14,7 +14,7 @@ enum class ElmStatus {
   Connected      // Инициализация завершена, идёт опрос OBD
 };
 
-// Одна строка экрана ELM Connect. Копируется с мьютексом через elm_get_found().
+// Одна строка экрана ELM Monitor. Копируется с мьютексом через elm_get_found().
 struct ElmScanEntry {
   char address[24];  // BLE MAC в виде "AA:BB:CC:DD:EE:FF"
   char name[40];     // Широковещательное имя или "<unknown>"
@@ -29,7 +29,7 @@ void elm_connect(const String& addr);       // Сохранить адрес и 
 bool elm_is_connected();                    // true только после завершения AT-инициализации
 void elm_set_race_mode(bool enabled);       // режим замера: только 010C0D с таймштампом
 
-// Информация об уже подключённом адаптере для экрана ELM Connect. rssi = -127,
+// Информация об уже подключённом адаптере для экрана ELM Monitor. rssi = -127,
 // если подключение было прямое по сохранённому MAC и advertisement не принимался.
 struct ElmConnectedInfo {
   char name[40];
@@ -41,7 +41,7 @@ struct ElmConnectedInfo {
   uint32_t sinceMs;   // millis() завершения AT-инициализации
 };
 
-// Состояние, найденные устройства и данные активного соединения для экрана ELM Connect.
+// Состояние, найденные устройства и данные активного соединения для экрана ELM Monitor.
 ElmStatus elm_status();
 size_t elm_get_found(ElmScanEntry* out, size_t max);
 bool elm_get_connected(ElmConnectedInfo& out);

@@ -29,7 +29,7 @@ void setup() {
 
   storage_init();  // Открыть NVS до первого чтения сохранённого адреса ELM
   storage_log("BOOT");
-  Serial.println("SmartDash: 'log' - ELM log tail, 'log all' - full, 'clear' - reset");
+  Serial.println("SmartDash: 'log', 'log all', 'clear', 'sim rpm=... spd=... coolant=... volt=...'");
   display_init();  // ST77916 + подсветка + CST816S
   ui_init();       // Выделить спрайт и сбросить кэши отрисовки
   ui_show_boot();  // Короткая заставка перед дашбордом

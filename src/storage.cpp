@@ -7,6 +7,7 @@
  * Доступ из BLE-задачи и Serial/HTTP защищён мьютексом.
  */
 #include "storage.h"
+#include "sim.h"
 
 #include <LittleFS.h>
 #include <freertos/FreeRTOS.h>
@@ -238,12 +239,12 @@ void storage_dump_log_serial(bool all) {
     pos += n;
   }
   Serial.println("\n=== end of log ===");
-  Serial.println("Commands: log - tail, log all - full, clear - reset, help - hint");
+  Serial.println("Commands: log - tail, log all - full, clear - reset, sim - test data, help - hint");
 }
 
 // Неблокирующий разбор команд из USB Serial: verb [arg].
 void storage_serial_loop() {
-  static char line[32];
+  static char line[128];  // команды sim с несколькими полями длиннее 32 байт
   static size_t len = 0;
   while (Serial.available() > 0) {
     char c = (char)Serial.read();
@@ -251,6 +252,11 @@ void storage_serial_loop() {
       if (len == 0) continue;
       line[len] = '\0';
       len = 0;
+
+      // Тестовый режим читает тот же поток, поэтому 'sim ...' разбирается
+      // здесь, а не отдельным читателем Serial (иначе строки перехватывались
+      // бы пополам между двумя обработчиками).
+      if (sim_handle_line(line)) continue;
 
       char verb[16] = {0};
       char arg[8] = {0};
@@ -274,7 +280,7 @@ void storage_serial_loop() {
         storage_clear_log();
         Serial.println("ELM log cleared");
       } else if (strcmp(verb, "help") == 0 || strcmp(verb, "h") == 0) {
-        Serial.println("Commands: log - tail, log all - full, clear - reset");
+        Serial.println("Commands: log, log all, clear, sim (rpm/spd/coolant/volt), sim off");
       } else {
         Serial.println("Unknown command. Type 'help'.");
       }

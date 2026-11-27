@@ -24,7 +24,7 @@ bool ui_get_data(DashData& out);             // Забрать новый snapsh
 void ui_show_boot();                         // Однократная заставка "SmartDash"
 void ui_show_search();                       // Текстовый экран "Searching ELM..."
 void ui_show_dash();                         // Перерисовать изменившиеся виджеты в спрайте
-void ui_show_elm_connect();                  // Открыть экран ELM Connect (поиск идёт в фоне)
+void ui_show_elm_connect();                  // Открыть экран ELM Monitor (поиск идёт в фоне)
 void ui_hide_elm_connect();                  // Вернуться на дашборд с полной перерисовкой
 void ui_loop();                              // Опрос ввода, анимация, тикер и рендер активного экрана
 

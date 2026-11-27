@@ -20,6 +20,8 @@ constexpr int RPM_JUMP = 600;              // рост оборотов от х�
 constexpr int MIN_LAUNCH_SPEED = 3;        // защита от «газовки» на месте; старт по скорости
 constexpr uint32_t RUN_TIMEOUT_MS = 60000; // защита от вечного замера
 constexpr int STALL_RPM = 1000;            // ниже — считаем, что мотор заглох
+constexpr int RPM_DROP_FINISH = 800;       // сброс оборотов = конец заезда
+constexpr uint32_t MIN_RUN_MS_FINISH = 1000;  // не завершать по случайному провалу на старте
 
 DragState state = DragState::Disabled;
 DragResult result;
@@ -30,6 +32,7 @@ int idleRpm = 0;
 uint32_t launchT = 0;
 uint32_t launchSpeedT = 0;   // интерполированный момент пересечения скорости старта
 bool launchSpeedSeen = false;
+int runPeakRpm = 0;          // максимум оборотов в заезде — от него ищем сброс
 
 bool havePrev = false;
 uint32_t prevT = 0;
@@ -68,6 +71,7 @@ void drag_begin(uint16_t t) {
   launchT = 0;
   launchSpeedT = 0;
   launchSpeedSeen = false;
+  runPeakRpm = 0;
   havePrev = false;
   savedSplits = 0;
 }
@@ -123,6 +127,7 @@ void drag_feed(uint32_t t_ms, int rpm, int speed_kmh, bool connected) {
       state = DragState::Running;
     }
   } else if (state == DragState::Running) {
+    if (rpm > runPeakRpm) runPeakRpm = rpm;
     // За один сэмпл могли проскочить сразу несколько отметок — фиксируем все.
     while (savedSplits < DRAG_MAX_SPLITS) {
       int k = (savedSplits + 1) * DRAG_SPLIT_STEP;
@@ -141,10 +146,19 @@ void drag_feed(uint32_t t_ms, int rpm, int speed_kmh, bool connected) {
     if (targetIdx >= 0 && targetIdx < DRAG_MAX_SPLITS && result.has[targetIdx]) {
       result.total_cs = result.split_cs[targetIdx];
       state = DragState::Finished;
-    } else if ((uint32_t)(t_ms - launchT) > RUN_TIMEOUT_MS) {
-      abortRun(DragAbort::Timeout);
     } else if (rpm < STALL_RPM && (uint32_t)(t_ms - launchT) > 500) {
       abortRun(DragAbort::Stall);
+    } else if (savedSplits > 0 && (uint32_t)(t_ms - launchT) >= MIN_RUN_MS_FINISH &&
+               rpm <= runPeakRpm - RPM_DROP_FINISH) {
+      // Сброс оборотов после разгона — конец заезда, даже если до выбранной
+      // цели не доехали. Фиксируем последнюю пересечённую отметку: она и есть
+      // реальный интервал, который удалось проехать.
+      const int idx = savedSplits - 1;
+      result.target = (idx + 1) * DRAG_SPLIT_STEP;
+      result.total_cs = result.split_cs[idx];
+      state = DragState::Finished;
+    } else if ((uint32_t)(t_ms - launchT) > RUN_TIMEOUT_MS) {
+      abortRun(DragAbort::Timeout);
     }
   }
 
