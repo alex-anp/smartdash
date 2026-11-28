@@ -63,10 +63,35 @@ constexpr int SPEED_CLEAR_Y = 118;
 constexpr int SPEED_CLEAR_W = 140;
 constexpr int SPEED_CLEAR_H = 104;  // до y=221; подпись km/h начинается с y=225
 
-constexpr int BOTTOM_X = 30;
-constexpr int BOTTOM_Y = 278;
-constexpr int BOTTOM_W = 300;
-constexpr int BOTTOM_H = 60;
+// ЖК-блок в стиле Honda Dunk: одно окно 200x50 (4:1), утопленное в чёрную
+// рамку и поднятое выше подписи скорости. Фон — приглушённый желтоватый
+// «old-school LCD», символы — чёрные сегменты; погашенные сегменты чуть темнее.
+constexpr int BOTTOM_X = 80;
+constexpr int BOTTOM_Y = 262;
+constexpr int BOTTOM_W = 200;
+constexpr int BOTTOM_H = 50;
+constexpr uint16_t LCD_BG_COLOR = 0xFD80;        // #FFB300, оранжевая подсветка
+constexpr uint16_t LCD_SEG_OFF_COLOR = 0xDCC0;   // #D99A00, погашенные сегменты
+constexpr uint16_t LCD_EDGE_DARK = 0x7AA0;       // #7A5400, тёмная кромка по всему периметру
+// Эффект утопления делается внутри окна: подсветка у краёв чуть темнее, к
+// центру переходит в основной оранжевый. Снаружи серой тени нет — на чёрном
+// фоне она читалась бы как лишняя рамка.
+constexpr int LCD_VIGNETTE_W = 4;
+constexpr uint16_t LCD_VIGNETTE[LCD_VIGNETTE_W] = {
+  0x6A40, 0x9B40, 0xC440, 0xED00  // #6B4900 → #ECA100
+};
+constexpr int LCD_RADIUS = 6;
+constexpr int LCD_DIGIT_W = 16;
+constexpr int LCD_DIGIT_H = 26;
+constexpr int LCD_DIGIT_T = 3;
+
+// Статус ELM выводится сразу под ЖК-окном (дуга RPM проходит по верхней
+// половине, поэтому под окном свободно).
+constexpr int STATUS_CLEAR_X = 110;
+constexpr int STATUS_CLEAR_Y = 328;
+constexpr int STATUS_CLEAR_W = 140;
+constexpr int STATUS_CLEAR_H = 18;
+constexpr int STATUS_Y = 336;  // середина между нижним краем ЖК (312) и краем экрана (360)
 
 // Полноэкранный back-буфер. PSRAM разгружает внутреннюю ОЗУ от кадра ~252 КБ;
 // pushSprite() — единственная прямая запись в панель за кадр.
@@ -405,9 +430,13 @@ void update_rpm(int oldRpm, int newRpm) {
 
 // Семисегментная цифра из скруглённых прямоугольников. Битовые маски — классическая
 // раскладка abcdefg: бит0=A (верх), бит1=B (верхний правый), ... бит6=G (середина).
-void draw_seg_digit(lgfx::LGFX_Device& d, int x, int y, int w, int h, int t, int digit, uint16_t on, uint16_t off) {
+// draw_seg_mask рисует произвольную маску — она нужна для букв C/V на ЖК-экране.
+uint8_t digitMask(int digit) {
   static const uint8_t seg[10] = {0x3F, 0x06, 0x5B, 0x4F, 0x66, 0x6D, 0x7D, 0x07, 0x7F, 0x6F};
-  uint8_t m = (digit >= 0 && digit <= 9) ? seg[digit] : 0;
+  return (digit >= 0 && digit <= 9) ? seg[digit] : 0;
+}
+
+void draw_seg_mask(lgfx::LGFX_Device& d, int x, int y, int w, int h, int t, uint8_t m, uint16_t on, uint16_t off) {
   int gap = 2;
   int hh = (h - 3 * t) / 2;
   int mid = y + h / 2 - t / 2;
@@ -420,6 +449,10 @@ void draw_seg_digit(lgfx::LGFX_Device& d, int x, int y, int w, int h, int t, int
   d.fillRoundRect(x, mid + t / 2 + gap, t, hh - gap, r, col(m & 0x10));                       // E
   d.fillRoundRect(x, y + t + gap, t, hh - gap, r, col(m & 0x20));                             // F
   d.fillRoundRect(x + t + gap, mid, w - 2 * t - 2 * gap, t, r, col(m & 0x40));               // G
+}
+
+void draw_seg_digit(lgfx::LGFX_Device& d, int x, int y, int w, int h, int t, int digit, uint16_t on, uint16_t off) {
+  draw_seg_mask(d, x, y, w, h, t, digitMask(digit), on, off);
 }
 
 // Блок скорости. Подпись "km/h" рисуется один раз в draw_static(), поэтому здесь
@@ -446,72 +479,92 @@ void draw_speed(int speed) {
                  SPEED_DIGIT_H, SPEED_SEG_T, d2, on, off);
 }
 
-// Маленькие контурные иконки рядом с числами в нижней части циферблата.
-void draw_temp_icon(int x, int y, uint16_t c) {
-  auto& d = g();
-  d.drawRoundRect(x - 4, y - 12, 8, 16, 3, c);
-  d.fillCircle(x, y + 7, 5, c);
-  d.fillRect(x - 1, y - 7, 2, 12, c);
-  d.drawFastHLine(x + 5, y - 8, 3, c);
-  d.drawFastHLine(x + 5, y - 4, 3, c);
-  d.drawFastHLine(x + 5, y, 3, c);
+// ЖК-окно: скруглённая чёрная рамка, внутри — подсветка с лёгким затемнением
+// у краёв по всему периметру. Снаружи ничего не рисуем, чтобы не было серой рамки.
+void draw_lcd_frame(lgfx::LGFX_Device& d) {
+  d.fillRoundRect(BOTTOM_X, BOTTOM_Y, BOTTOM_W, BOTTOM_H, LCD_RADIUS, TFT_BLACK);
+
+  const int ix = BOTTOM_X + 2;
+  const int iy = BOTTOM_Y + 2;
+  const int iw = BOTTOM_W - 4;
+  const int ih = BOTTOM_H - 4;
+  const int ir = LCD_RADIUS - 2;
+  d.fillRoundRect(ix, iy, iw, ih, ir, LCD_BG_COLOR);
+  // Внутреннее затемнение по периметру: от тёмного оранжевого у рамки к фону.
+  for (int i = 0; i < LCD_VIGNETTE_W; ++i) {
+    d.drawRoundRect(ix + i, iy + i, iw - 2 * i, ih - 2 * i,
+                    max(0, ir - i), LCD_VIGNETTE[i]);
+  }
+  // Одинаковая тёмная кромка по всему периметру — затемнение не должно
+  // обрываться снизу/справа, как это было со светлой гранью.
+  d.drawRoundRect(ix, iy, iw, ih, ir, LCD_EDGE_DARK);
 }
 
-void draw_batt_icon(int x, int y, uint16_t c) {
-  auto& d = g();
-  d.drawRoundRect(x - 12, y - 8, 22, 16, 2, c);
-  d.fillRect(x + 10, y - 3, 3, 6, c);
-  d.drawFastHLine(x - 7, y, 5, c);
-  d.drawFastVLine(x - 5, y - 2, 5, c);
-  d.drawFastHLine(x + 1, y, 5, c);
+// Иконки на ЖК-экране — те же градусник и батарея, но чёрным контуром.
+void draw_lcd_temp_icon(lgfx::LGFX_Device& d, int x, int y) {
+  d.drawRoundRect(x - 4, y - 15, 8, 21, 3, TFT_BLACK);
+  d.drawCircle(x, y + 10, 6, TFT_BLACK);
+  d.fillCircle(x, y + 10, 3, TFT_BLACK);
+  d.fillRect(x - 1, y + 2, 2, 10, TFT_BLACK);
 }
 
-// Нижняя полоса: температура слева, напряжение справа, статус ELM ниже по центру.
-// Цвета по фиксированным порогам, чтобы состояние читалось без цифр.
+void draw_lcd_batt_icon(lgfx::LGFX_Device& d, int x, int y) {
+  d.drawRect(x - 13, y - 8, 25, 16, TFT_BLACK);
+  d.fillRect(x + 12, y - 3, 3, 6, TFT_BLACK);
+  d.drawFastHLine(x - 9, y, 6, TFT_BLACK);         // минус
+  d.drawFastVLine(x + 1, y - 4, 8, TFT_BLACK);     // плюс
+  d.drawFastHLine(x - 3, y, 8, TFT_BLACK);
+}
+
+// Нижний ЖК-блок: температура слева (°C), напряжение справа (V), всё — чёрными
+// сегментами на желтоватом фоне. Status ELM остаётся под окном на чёрном фоне.
 void draw_bottom(int coolant_c, float volt, bool connected) {
   auto& d = g();
-  d.fillRect(BOTTOM_X, BOTTOM_Y, BOTTOM_W, BOTTOM_H, TFT_BLACK);
+  draw_lcd_frame(d);
   addDirtyRect(BOTTOM_X, BOTTOM_Y, BOTTOM_W, BOTTOM_H);
-  uint16_t tColor = 0xC618;
-  if (coolant_c >= 0) {
-    if (coolant_c < gSettings.coolantLow) tColor = TFT_CYAN;
-    else if (coolant_c <= gSettings.coolantHigh) tColor = TFT_GREEN;
-    else tColor = TFT_RED;
-  }
+  d.fillRect(STATUS_CLEAR_X, STATUS_CLEAR_Y, STATUS_CLEAR_W, STATUS_CLEAR_H, TFT_BLACK);
+  addDirtyRect(STATUS_CLEAR_X, STATUS_CLEAR_Y, STATUS_CLEAR_W, STATUS_CLEAR_H);
 
-  uint16_t vColor = 0xC618;
-  if (volt > 0.1f) {
-    if (volt < gSettings.voltLow) vColor = TFT_RED;
-    else if (volt < gSettings.voltMid) vColor = TFT_ORANGE;
-    else if (volt <= gSettings.voltHigh) vColor = TFT_GREEN;
-    else vColor = TFT_RED;
-  }
+  const int y = BOTTOM_Y + 10;
+  const uint16_t on = TFT_BLACK;
+  const uint16_t off = LCD_SEG_OFF_COLOR;
+  auto seg = [&](int x, int w, int h, int t, uint8_t m) {
+    draw_seg_mask(d, x, y + (LCD_DIGIT_H - h) / 2, w, h, t, m, on, off);
+  };
 
-  draw_temp_icon(86, 298, tColor);
-  d.setTextDatum(middle_left);
-  d.setTextColor(tColor, TFT_BLACK);
-  char tbuf[16];
-  if (coolant_c < 0) snprintf(tbuf, sizeof(tbuf), "--C");
-  else snprintf(tbuf, sizeof(tbuf), "%dC", coolant_c);
-  d.drawString(tbuf, 100, 298, 4);
+  // Температура: градусник, две цифры, маленькое «°» и семисегментная «C».
+  draw_lcd_temp_icon(d, 90, y + LCD_DIGIT_H / 2);
+  const int t1 = coolant_c >= 10 ? coolant_c / 10 : -1;
+  const int t2 = coolant_c >= 0 ? coolant_c % 10 : -1;
+  seg(104, LCD_DIGIT_W, LCD_DIGIT_H, LCD_DIGIT_T, digitMask(t1));
+  seg(123, LCD_DIGIT_W, LCD_DIGIT_H, LCD_DIGIT_T, digitMask(t2));
+  d.drawCircle(144, y + 3, 3, TFT_BLACK);
+  seg(149, 10, 14, 3, 0x39);  // C: A, D, E, F
+  d.drawFastVLine(166, y + 3, 20, LCD_SEG_OFF_COLOR);
 
-  draw_batt_icon(222, 298, vColor);
-  d.setTextColor(vColor, TFT_BLACK);
-  char vbuf[16];
-  if (volt <= 0.1f) snprintf(vbuf, sizeof(vbuf), "--.-V");
-  else snprintf(vbuf, sizeof(vbuf), "%.1fV", volt);
-  d.drawString(vbuf, 238, 298, 4);
+  // Напряжение: батарея, три цифры с десятичной точкой и «V» (сегменты B..F).
+  draw_lcd_batt_icon(d, 183, y + LCD_DIGIT_H / 2);
+  const bool haveVolt = volt > 0.1f;
+  const int tenths = haveVolt ? (int)lroundf(volt * 10.0f) : -1;
+  const int v1 = tenths >= 100 ? tenths / 100 : -1;
+  const int v2 = tenths >= 10 ? (tenths / 10) % 10 : -1;
+  const int v3 = tenths >= 0 ? tenths % 10 : -1;
+  seg(202, LCD_DIGIT_W, LCD_DIGIT_H, LCD_DIGIT_T, digitMask(v1));
+  seg(221, LCD_DIGIT_W, LCD_DIGIT_H, LCD_DIGIT_T, digitMask(v2));
+  d.fillCircle(240, y + LCD_DIGIT_H - 3, 2, TFT_BLACK);
+  seg(243, LCD_DIGIT_W, LCD_DIGIT_H, LCD_DIGIT_T, digitMask(v3));
+  seg(263, 10, 14, 3, 0x3E);  // V: B, C, D, E, F
 
   // Индикатор ELM: три точки загораются по очереди во время подключения.
   if (connected) {
     d.setTextDatum(middle_center);
     d.setTextColor(TFT_GREEN, TFT_BLACK);
-    d.drawString("ELM OK", SCREEN_CENTER_X, 324, 2);
+    d.drawString("ELM OK", SCREEN_CENTER_X, STATUS_Y, 2);
   } else {
     d.setTextDatum(middle_right);
     d.setTextColor(TFT_ORANGE, TFT_BLACK);
-    d.drawString("ELM", SCREEN_CENTER_X - 12, 324, 2);
-    draw_status_dots(d, SCREEN_CENTER_X + 18, 324, TFT_ORANGE, 0x4208, dot_phase);
+    d.drawString("ELM", SCREEN_CENTER_X - 12, STATUS_Y, 2);
+    draw_status_dots(d, SCREEN_CENTER_X + 18, STATUS_Y, TFT_ORANGE, 0x4208, dot_phase);
   }
 }
 
