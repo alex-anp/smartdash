@@ -13,3 +13,6 @@
 /reference/sdcard/
 
 sessiom.json
+
+# Python bytecode from tools/generate_digits.py
+__pycache__/
